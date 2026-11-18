@@ -1047,3 +1047,41 @@ def test_format_now_refuses_with_a_damaged_child_registry(tmp_path, tools_dir, l
     with pytest.raises(EngineError, match="provided.json"):
         Ops(eng).run_action("format_now")
     assert {f.name: f.read_bytes() for f in rtl.glob("*.sv")} == before
+
+
+def test_downstream_flows_build_from_the_parent_filelist(tmp_path, tools_dir, llm):
+    """R5 / T9: the dv, sanity, fpga and asic steps read the parent's `src/rtl/filelist.f`, which lists the child copies before the parent's
+    module, so their commands (built here, no tool run) use the assembled IP."""
+    from q3tui import flows
+    from q3tui.flows.asic.lib import dc
+    from q3tui.flows.dv.plain import gen as dv_gen
+    from q3tui.flows.fpga.lib import vivado
+    from q3tui.flows.sanity.lib import script as sanity_script
+
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    project = eng.project
+    root, rtl = project.root, project.rtl_dir
+    want = [(rtl / n).resolve() for n in ("m_cha_top.sv", "m_chb_top.sv", "m_par_top.sv")]
+    # dv: the filelist order, children first
+    tb, work = root / "src" / "tb", root / "build" / "sim"
+    tb.mkdir(parents=True, exist_ok=True)
+    (tb / "tb_top.sv").write_text("module tb_top; endmodule\n")
+    _, absf, files = dv_gen.filelists(root, tb, rtl, work, [])
+    assert files[:3] == want and absf.read_text().split()[:3] == [str(p) for p in want]
+    # sanity: the absolute filelist keeps the order
+    abs_fl = sanity_script.absolute_filelist(rtl / "filelist.f", root, root / "build" / "sanity")
+    assert [ln for ln in abs_fl.read_text().split() if not ln.startswith(("//", "#"))][:3] == [str(p) for p in want]
+    # fpga / asic: every *.sv of the RTL folder (sorted by name), so the three files are there and the script names them
+    for name, step_name in (("fpga", "fpga_synth"), ("asic", "asic_synth")):
+        e = Engine(project, flow=flows.load_flow(name, root))
+        got = e.by_name[step_name].rtl_files(e)
+        assert {p.resolve() for p in want} <= {p.resolve() for p in got}
+        if name == "fpga":
+            text = vivado.script_text(got, "m_par_top", project.sdc_dir, root / "build" / "syn" / "fpga", {})
+        else:
+            text = dc.script_text(got, "m_par_top", ["lib.db"], None, root / "build" / "syn" / "asic", root / "build" / "syn" / "asic" / "n.v", {})
+        for n in ("m_cha_top.sv", "m_chb_top.sv", "m_par_top.sv"):
+            assert n in text
