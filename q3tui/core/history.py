@@ -193,6 +193,21 @@ def changed(project, a: str, b: str = MAIN, paths: list[str] | None = None) -> l
     return [f for f in _git(project, "diff", "--name-only", a, b, "--", *(paths or [])).splitlines() if f.strip()]
 
 
+def mark(project, flow: str) -> str | None:
+    """The version `flow` last passed with (`passed/<flow>`); None when it never passed or the project has no history. Read by another
+    project too: an integration project asks whether its child projects passed their own rtl flow (flows/rtl/lib/children.py)."""
+    return _ref(project, PASSED + flow) if exists(project) else None
+
+
+def changed_since(project, rev: str, paths: list[str]) -> list[str]:
+    """The files of `paths` (relative to the project root) whose content in the project folder now differs from version `rev`, whether or
+    not a version was recorded since (the work tree, not the last version: what was edited after `rev`). No paths: none (git would take
+    every file)."""
+    if not paths:
+        return []
+    return [f for f in _git(project, "diff", "--name-only", rev, "--", *paths).splitlines() if f.strip()]
+
+
 def diff(project, a: str, b: str | None = MAIN, paths: list[str] | None = None, max_lines: int | None = None) -> str:
     """The changes from version `a` to `b` (None: a's own changes, against the version before it), as a unified diff; `max_lines` caps it."""
     if b is None:
