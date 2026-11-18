@@ -233,8 +233,9 @@ def test_a_child_module_named_like_this_projects_own_module_stops(tmp_path):
     kids = children.resolve(par, ["../cha"])
     with pytest.raises(children.ChildError) as e:
         children.copy(project, rtl, kids, {"m_cha_top"})
-    assert str(e.value) == ("`m_cha_top` of the child project ../cha (../cha/src/rtl/m_cha_top.sv) has the name of this project's own module "
-                            "(src/rtl/m_cha_top.sv): rename one of them")
+    assert str(e.value) == ("`m_cha_top` of the child project ../cha (../cha/src/rtl/m_cha_top.sv) is not the same file as this project's own "
+                            "src/rtl/m_cha_top.sv (made here by the csr step, with the APB-CSR-Generator): both projects must use the same "
+                            "APB-CSR-Generator version, or rename one of them")
     rtl.mkdir(parents=True)
     mine = "module m_cha_top (input logic i_clk);\nendmodule\n"
     (rtl / "m_cha_top.sv").write_text(mine)  # (this project's own file, not a copy)
@@ -244,6 +245,47 @@ def test_a_child_module_named_like_this_projects_own_module_stops(tmp_path):
     (rtl / "m_cha_top.sv").write_text(CHA)  # (the child's very bytes: adopted)
     res = children.copy(project, rtl, kids, set())
     assert list(res.registry) == ["m_cha_top"] and not (res.copied or res.restored)
+
+
+SYNC = "module m_csr_sync (\n  input  logic i_clk,\n  input  logic i_d,\n  output logic o_q\n);\n  assign o_q = i_d;\nendmodule\n"  # (the generator's model)
+CHS = "module m_cha_top (\n  input  logic i_clk,\n  input  logic i_d,\n  output logic o_q\n);\n  m_csr_sync u_sync (.i_clk(i_clk), .i_d(i_d), .o_q(o_q));\nendmodule\n"
+
+
+def test_the_generators_model_made_here_and_by_a_child_is_this_projects(tmp_path):
+    """Ruling 14 (I2): a unit this project makes itself (`own`: the csr step's, here the APB-CSR-Generator's synchronizer model, whose name is the
+    tool's) that a child provides with the very same bytes is no clash: the file stays this project's, neither copied nor recorded (the child's
+    module that instantiates it still names it). So it goes for a copy recorded before this project made it (its async CSR turned on later): it
+    leaves the registry, and its file stays."""
+    make_child(tmp_path, "cha", {"m_csr_sync.sv": SYNC, "m_cha_top.sv": CHS})
+    par, project, rtl = _par(tmp_path)
+    rtl.mkdir(parents=True)
+    (rtl / "m_csr_sync.sv").write_text(SYNC)  # (this project's csr step made the very same file)
+    kids = children.resolve(par, ["../cha"])
+    res = children.copy(project, rtl, kids, {"m_csr_sync", "m_par_csr"})
+    assert res.kept == ["m_csr_sync"] and res.copied == ["m_cha_top"] and list(children.read_registry(rtl)) == ["m_cha_top"]
+    assert (rtl / "m_csr_sync.sv").read_text() == SYNC and children.read_registry(rtl)["m_cha_top"]["instances"] == ["m_csr_sync"]
+    # the model was a copy first (no CSR here yet), then this project's csr step made the same file
+    (rtl / "m_csr_sync.sv").unlink()
+    children.copy(project, rtl, kids, set())
+    assert list(children.read_registry(rtl)) == ["m_csr_sync", "m_cha_top"]
+    res = children.copy(project, rtl, kids, {"m_csr_sync", "m_par_csr"})
+    assert res.kept == ["m_csr_sync"] and list(children.read_registry(rtl)) == ["m_cha_top"] and (rtl / "m_csr_sync.sv").read_text() == SYNC
+    assert not (res.copied or res.restored or res.removed) and not list((par / ".q3tui").rglob("m_csr_sync.sv"))  # (not removed, not backed up)
+
+
+def test_the_generators_model_made_here_and_by_a_child_with_other_bytes_stops(tmp_path):
+    """Ruling 14 (I2): the same generator model with other bytes (another APB-CSR-Generator version) cannot be both: the copy stops naming both
+    files, the model and what to do, before anything is written."""
+    make_child(tmp_path, "cha", {"m_csr_sync.sv": SYNC.replace("assign o_q = i_d;", "always_ff @(posedge i_clk) o_q <= i_d;"), "m_cha_top.sv": CHA})
+    par, project, rtl = _par(tmp_path)
+    rtl.mkdir(parents=True)
+    (rtl / "m_csr_sync.sv").write_text(SYNC)
+    with pytest.raises(children.ChildError) as e:
+        children.copy(project, rtl, children.resolve(par, ["../cha"]), {"m_csr_sync", "m_par_csr"})
+    assert str(e.value) == ("`m_csr_sync` of the child project ../cha (../cha/src/rtl/m_csr_sync.sv) is not the same file as this project's own "
+                            "src/rtl/m_csr_sync.sv (the APB-CSR-Generator's synchronizer model, made here by the csr step): both projects must use "
+                            "the same APB-CSR-Generator version, or rename one of them")
+    assert (rtl / "m_csr_sync.sv").read_text() == SYNC and not (rtl / "m_cha_top.sv").exists() and not children.registry_file(rtl).exists()
 
 
 def test_a_hand_edited_copy_is_restored(tmp_path):
@@ -704,6 +746,27 @@ def test_a_middle_project_and_its_own_child_both_listed(tmp_path, tools_dir, llm
     assert placed == ["the spec names no module that instantiates m_core_top: the top m_par_top does"]
     (stage,) = calls(llm, "rtl_m_par_top")
     assert "`m_core_top` → src/rtl/m_core_top.sv" in stage.prompt and "`m_pe_top` →" not in stage.prompt
+
+
+def test_a_parent_with_its_own_async_csr_takes_a_child_with_the_same_model(tmp_path, tools_dir, llm):
+    """Ruling 14 (I2): this project's csr step made the synchronizer model a child has too, with the same bytes (the same APB-CSR-Generator
+    version): the rtl step keeps this project's file (logged), copies the rest of the child, and the design has the model once."""
+    make_child(tmp_path, "cha", {"m_csr_sync.sv": SYNC, "m_cha_top.sv": CHS})
+    eng = make_parent(tmp_path, tools_dir, ["../cha"])
+    rtl = eng.project.rtl_dir
+    (rtl / "csr").mkdir(parents=True)
+    (rtl / "m_csr_sync.sv").write_text(SYNC)
+    (rtl / "m_par_csr.sv").write_text("module m_par_csr (\n  input  logic i_clk,\n  output logic o_q\n);\n"
+                                      "  m_csr_sync u_sync (.i_clk(i_clk), .i_d(1'b1), .o_q(o_q));\nendmodule\n")
+    (rtl / "csr" / "provided.json").write_text(json.dumps({"m_par_csr": {"kind": "csr", "parent": "m_par_top", "req_ids": [], "instances": ["m_csr_sync"]},
+                                                          "m_csr_sync": {"kind": "model", "parent": "m_par_csr", "req_ids": [], "instances": []}}))
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert "`m_csr_sync`: the same file as this project's own (csr step): kept as this project's" in _said(seen, "log")
+    assert list(children.read_registry(rtl)) == ["m_cha_top"] and (rtl / "m_csr_sync.sv").read_text() == SYNC
+    assert (rtl / "filelist.f").read_text().split().count("src/rtl/m_csr_sync.sv") == 1 and eng.state.steps["rtl"].status == "done"
+    assert rtl / "m_csr_sync.sv" not in children.protected(eng)  # (this project's file: its lint findings are fixed here, as the csr step's)
 
 
 # -- findings and change requests on the child projects' units (R3, R4, R11) --------------------------------------------

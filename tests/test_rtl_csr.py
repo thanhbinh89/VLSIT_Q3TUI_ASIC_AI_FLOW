@@ -333,6 +333,29 @@ def test_a_change_that_no_longer_fits_the_new_module_goes_to_the_rtl_step(csr_pr
     assert req.startswith("[rtl:m_blk_csr]") and "no longer fit" in req and "+  // NEW LINE" in req and "m_blk_csr.md" in req
 
 
+def test_the_csr_step_never_overwrites_a_child_projects_copy_with_other_bytes(csr_proj):
+    """Ruling 14 (I2, FR-01): the tool makes a unit that is a child project's copy here (this project's async CSR turned on after the copy). Other
+    bytes stop the step naming the child project, before anything is written: the copy is read-only here. The same bytes are the same file."""
+    root, eng, fake = csr_proj
+    rtl = root / "src" / "rtl"
+    (rtl / "child").mkdir(parents=True)
+    theirs = "module m_vlsi_synch (input logic i_clk);\nendmodule\n"  # (another version of the generator's model)
+    (rtl / "m_vlsi_synch.sv").write_text(theirs)
+    (rtl / "child" / "provided.json").write_text(json.dumps({"m_vlsi_synch": {
+        "kind": "child", "owner": "../cha", "child": "../cha", "source": "../cha/src/rtl/m_vlsi_synch.sv", "sha256": "-", "file": "m_vlsi_synch.sv",
+        "unit": "module", "instances": []}}))
+    with pytest.raises(StepFailed) as exc:
+        run_csr(eng)
+    assert str(exc.value) == ("csr: the APB-CSR-Generator makes `m_vlsi_synch`, which the child project ../cha provides here with other bytes "
+                              "(src/rtl/m_vlsi_synch.sv, a copy of ../cha/src/rtl/m_vlsi_synch.sv): the copy is not overwritten — both projects must "
+                              "use the same APB-CSR-Generator version, or rename one of them")
+    assert (rtl / "m_vlsi_synch.sv").read_text() == theirs and not (rtl / "m_blk_csr.sv").exists() and csr.read_provided(rtl) == {}
+    (rtl / "m_vlsi_synch.sv").write_text("module m_vlsi_synch; endmodule\n")  # (what this generator makes: the same file)
+    run_csr(eng)
+    assert eng.state.steps["csr"].status == "done" and (rtl / "m_vlsi_synch.sv").read_text() == "module m_vlsi_synch; endmodule\n"
+    assert set(csr.read_provided(rtl)) == {"m_blk_csr", "m_vlsi_synch"}  # (the rtl step's copy then keeps it as this project's)
+
+
 def test_a_patch_applies_where_its_lines_moved_to_and_the_tool_s_date_is_no_change():
     from q3tui.flows.rtl.lib import patches
 

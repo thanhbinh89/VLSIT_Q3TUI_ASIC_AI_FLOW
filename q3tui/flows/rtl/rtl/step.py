@@ -151,6 +151,8 @@ class Step(RtlGenStep):
             raise StepFailed(str(exc)) from exc
         if res.copied:
             ctx.emit("log", message=f"child projects: copied {', '.join(res.copied)}")
+        for unit in res.kept:  # (the csr step made it too, the very same file: the generator's synchronizer model of an async CSR)
+            ctx.emit("log", message=f"`{unit}`: the same file as this project's own (csr step): kept as this project's")
         for unit in res.restored:
             e = res.registry[unit]
             ctx.emit("warning", message=f"{unit}: its copy here was changed — restored from {e['source']} (a file of the child project "

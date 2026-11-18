@@ -49,6 +49,7 @@ class CopyResult:
     copied: list[str] = field(default_factory=list)  # units written: new here, or their child's file changed
     restored: list[str] = field(default_factory=list)  # units whose copy was edited or deleted here: the child's file again
     removed: list[str] = field(default_factory=list)  # units no child provides any more: their copy is gone (backed up)
+    kept: list[str] = field(default_factory=list)  # units this project makes itself that a child has with the very same bytes: this project's file
     warnings: list[str] = field(default_factory=list)
 
 
@@ -268,7 +269,8 @@ def entry_for(engine, unit: str, registry: dict[str, dict]) -> dict:
 
 def copy(project, rtl_dir: Path, children: list[Child], own: set[str]) -> CopyResult:
     """Copy the children's listed files into `rtl_dir` byte for byte and record them (R2); `own`: units this project makes itself (the csr
-    step's), which no child may provide. Everything is checked before anything is written: on a ChildError the folder is as it was."""
+    step's), which a child provides too only with the very same bytes (`kept`: the file stays this project's, neither copied nor recorded).
+    Everything is checked before anything is written: on a ChildError the folder is as it was."""
     base = _real(project.root)
     found = problems(base, children)
     if found:
@@ -277,10 +279,11 @@ def copy(project, rtl_dir: Path, children: list[Child], own: set[str]) -> CopyRe
     res, sources = CopyResult({}), {}
     for child in children:
         _add_units(base, child, res, sources)
-    for e in res.registry.values():
+    for e in res.registry.values():  # (before the kept units leave the registry: a child's module that instantiates one still names it)
         e["instances"] = [i for i in e["instances"] if i in res.registry]
-    for unit, e in res.registry.items():
-        _check_here(project, rtl_dir, unit, e, old, own)
+    res.kept = [unit for unit, e in res.registry.items() if _check_here(project, rtl_dir, unit, e, old, own)]
+    for unit in res.kept:
+        del res.registry[unit], sources[unit]
     _write(project, rtl_dir, res, sources, old)
     return res
 
@@ -349,22 +352,34 @@ def _owner_of(base: Path, child: Child, f: Path, sha: str, owners: dict, warning
     return owner
 
 
-def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, dict], own: set[str]) -> None:
-    """R8 against this project's own modules: a unit it makes itself, or a file of the unit's name here that is not a copy, stops the copy,
-    naming both. A file here with the child's very bytes is no clash: it becomes the copy."""
+def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, dict], own: set[str]) -> bool:
+    """R8 against this project's own modules. A unit it makes itself (the csr step's) that its file here has with the child's very bytes is no
+    clash, and stays this project's (True): the APB-CSR-Generator's synchronizer model has the tool's name, so a parent and a child with an
+    asynchronous CSR both have it. With other bytes it stops the copy naming both files (one design holds one `unit`). So does a file of the
+    unit's name here that is not a copy; one with the child's very bytes is no clash either: it becomes the copy (False)."""
+    if unit in own:
+        mine = rtl_dir / f"{unit}.sv"
+        if mine.is_file() and sha256_file(mine) == entry["sha256"]:
+            return True
+        from q3tui.flows.rtl.lib import csr
+
+        what = ("the APB-CSR-Generator's synchronizer model, made here by the csr step" if unit in csr.SYNC_MODELS
+                else "made here by the csr step, with the APB-CSR-Generator")
+        raise ChildError(f"`{unit}` of the child project {entry['owner']} ({entry['source']}) is not the same file as this project's own "
+                         f"{project.rel(mine)} ({what}): both projects must use the same APB-CSR-Generator version, or rename one of them")
     copy_here = (old.get(unit) or {}).get("file")
-    clash = [rtl_dir / f"{unit}.sv"] if unit in own else [
-        f for f in dict.fromkeys((rtl_dir / entry["file"], rtl_dir / f"{unit}.sv"))
-        if f.is_file() and f.name != copy_here and not (f.name == entry["file"] and sha256_file(f) == entry["sha256"])]
+    clash = [f for f in dict.fromkeys((rtl_dir / entry["file"], rtl_dir / f"{unit}.sv"))
+             if f.is_file() and f.name != copy_here and not (f.name == entry["file"] and sha256_file(f) == entry["sha256"])]
     if clash:
         raise ChildError(f"`{unit}` of the child project {entry['owner']} ({entry['source']}) has the name of this project's own module "
                          f"({project.rel(clash[0])}): rename one of them")
+    return False
 
 
 def _write(project, rtl_dir: Path, res: CopyResult, sources: dict[str, Path], old: dict[str, dict]) -> None:
     """Make the folder what the registry says: a copy written where its bytes differ from its child's file (backed up first), the copy of a unit
     no child provides any more deleted (backed up), the registry written, or deleted when no child is left (a project without children has
-    none)."""
+    none). A kept unit's file is this project's now (an earlier copy of it, recorded before the csr step made the same file): it stays."""
     for unit, e in res.registry.items():
         dest = rtl_dir / e["file"]
         if dest.is_file() and sha256_file(dest) == e["sha256"]:
@@ -375,9 +390,9 @@ def _write(project, rtl_dir: Path, res: CopyResult, sources: dict[str, Path], ol
         shutil.copyfile(sources[unit], dest)
         edited_here = prior.get("sha256") == e["sha256"] and prior.get("file") == e["file"]  # (the child's file is as it was: the copy changed)
         (res.restored if edited_here else res.copied).append(unit)
-    files = {e["file"] for e in res.registry.values()}
+    files = {e["file"] for e in res.registry.values()} | {f"{u}.sv" for u in res.kept}
     for unit, e in old.items():
-        if unit not in res.registry:
+        if unit not in res.registry and unit not in res.kept:
             res.removed.append(unit)
         f = e.get("file")
         if isinstance(f, str) and f == Path(f).name and f not in files and (rtl_dir / f).is_file():  # (a plain name: never outside the folder)
