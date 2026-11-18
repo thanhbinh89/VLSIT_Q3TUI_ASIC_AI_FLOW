@@ -92,8 +92,11 @@ class Step(RtlFlowStep):
         waived = set(meta.get("waived") or [])
         todo = [f for f in found if _waiver_key(f.module, f.rule, f.text) not in waived]
         report = {"rtl_files": [p.name for p in files], "flags": flags, "findings": len(found), "waived_findings": len(found) - len(todo),
-                  "syntax_errors": syntax, "rounds": meta["rounds"], "status": "clean",
-                  "provided": self._provided(engine)}
+                  "syntax_errors": syntax, "rounds": meta["rounds"], "status": "clean"}
+        from q3tui.flows.rtl.lib import children
+
+        if children.read_registry(self.rtl_dir(engine)):  # (with child projects only: a project without them keeps its report as it was, R10)
+            report["provided"] = self._provided(engine)
         if not todo and not syntax:
             write_json(self._report(engine), {**report, "verdict": {"summary": "no findings"}})
             self.save_questions(engine, [q for q in self.questions_list(engine) if q.id in load_answers(self._q_paths(engine)[1])])

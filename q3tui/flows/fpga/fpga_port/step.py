@@ -70,11 +70,14 @@ class Step(StepQuestions, FpgaStep):
         new = {k: v for k, v in decisions.items() if (prev.get("decisions") or {}).get(k) != v[1]}
         key = sha256_json({"scan": [x.to_dict() for x in found], "family": t.id, "device": device})
         report = {"part": device, "family": t.id, "tool": t.tool, "scan": [x.to_dict() for x in found], "key": key,
-                  "decisions": {k: v[1] for k, v in decisions.items()}, "refused": []}
+                  "decisions": {k: v[1] for k, v in decisions.items()}}
+        # (`refused` only when there is some: the file is an input of fpga_synth, and a key more would synthesize a project without child
+        # projects again for nothing, R10)
         requests = [f for f in ctx.feedback if not f.startswith(port.PART_CHANGED)]
         if not (requests or new or ctx.regenerate or (found and prev.get("key") != key)):
             # nothing new: the porter is not asked again (its last result, and the findings it left, stand)
-            report["refused"] = prev.get("refused", [])  # (what the last porter run refused stands with the rest of its result)
+            if prev.get("refused"):
+                report["refused"] = prev["refused"]  # (what the last porter run refused stands with the rest of its result)
             self.write(engine, port.PORT_JSON, {**{k: prev[k] for k in ("summary", "done", "orders", "handed", "requests") if k in prev}, **report})
             ctx.unchanged = prev.get("key") == key
             ctx.emit("log", message=f"fpga_port: {len(found)} finding(s) for {t.family} {device}" + (" — nothing new for the porter" if found else ""))
@@ -105,7 +108,8 @@ class Step(StepQuestions, FpgaStep):
         orders, refused = port.split_orders(res.orders, modules, registry)
         for r in refused:
             ctx.emit("warning", message=f"fpga_port: no change of {r['module']}: it belongs to the child project {r['owner']}: fix it there ({r['change'][:120]})")
-        report["refused"] = refused
+        if refused:
+            report["refused"] = refused
         owner, handed = str(self.options.get("handoff_flow") or "rtl"), []
         for o in orders:
             owner = port.hand_to_flow(ctx, owner, scoped("rtl", o.module, f"FPGA port ({t.family} {device}, {t.tool}): {o.change} Why: {o.why} "

@@ -1283,6 +1283,19 @@ def test_the_fpga_port_orders_on_a_child_module_are_refused():
     assert [o.module for o in kept] == ["blk", "ok"] and refused == []
 
 
+async def test_the_port_report_names_refused_orders_only_when_there_are_some(proj):
+    """M5 (R10): fpga_port.json is an input of fpga_synth: a project without child projects gets no `refused` key (an update brings no extra
+    synthesis); the orders a porter run refused stand while nothing is new."""
+    eng = Engine(proj)
+    await eng.run_step(eng.by_name["fpga_port"])
+    f = proj.schemas_dir / "fpga_port.json"
+    assert "refused" not in json.loads(f.read_text())
+    refused = [{"module": "blk", "owner": "../cha", "change": "use a block RAM"}]
+    f.write_text(json.dumps({**json.loads(f.read_text()), "refused": refused}))  # (as a porter run with an order on a child module left it)
+    await eng.run_step(eng.by_name["fpga_port"])  # (nothing new: its last result stands)
+    assert json.loads(f.read_text())["refused"] == refused
+
+
 def test_a_ppa_fix_on_a_child_module_is_not_handed_off(proj):
     (proj.root / "flows").mkdir(exist_ok=True)
     (proj.root / "flows" / "owner.yaml").write_text("name: owner\nsteps:\n  - {id: spec, kind: spec}\n  - {id: rtl, kind: reads, deps: [spec]}\n")

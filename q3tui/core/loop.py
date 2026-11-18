@@ -66,6 +66,12 @@ def _child_files(rtl: Path) -> set[Path]:
     return {rtl / e["file"] for e in records.values() if isinstance(e.get("file"), str) and e["file"]}
 
 
+def _in_registry_folder(rel: Path) -> bool:
+    """A file (relative to the RTL folder) in the child projects' registry folder: `child/` at the top only. A folder named child deeper down
+    is this project's own RTL."""
+    return len(rel.parts) > 1 and rel.parts[0] == "child"
+
+
 def _keep_best(project: Project, rnd: Round) -> Path:
     dest = best_dir(project)
     shutil.rmtree(dest, ignore_errors=True)
@@ -74,7 +80,7 @@ def _keep_best(project: Project, rnd: Round) -> Path:
     skip = _child_files(rtl)
     for f in sorted(rtl.rglob("*")):
         if f.is_file() and "smoke" not in f.relative_to(rtl).parts and "style_lint" not in f.relative_to(rtl).parts and f not in skip \
-                and "child" not in f.relative_to(rtl).parts[:-1]:
+                and not _in_registry_folder(f.relative_to(rtl)):
             (dest / f.relative_to(rtl)).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dest / f.relative_to(rtl))
     write_json(dest.parent / "best.json", {"round": rnd.number, "open": rnd.open, "total": rnd.total, "at": datetime.now().isoformat(timespec="seconds")})
@@ -89,7 +95,7 @@ def restore_best(project: Project) -> str:
         raise EngineError("no best round recorded: run `q3tui loop` first")
     skip = _child_files(project.rtl_dir)
     files = [f for f in sorted(src.rglob("*")) if f.is_file() and project.rtl_dir / f.relative_to(src) not in skip
-             and "child" not in f.relative_to(src).parts[:-1]]
+             and not _in_registry_folder(f.relative_to(src))]
     project.backup([project.rtl_dir / f.relative_to(src) for f in files])
     for f in files:
         dest = project.rtl_dir / f.relative_to(src)

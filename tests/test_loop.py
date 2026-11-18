@@ -93,6 +93,19 @@ def test_the_best_rtl_leaves_child_files_alone(loop_proj):
     assert (rtl / "cha.sv").read_text() == "module cha; endmodule\n" and "other" not in (rtl / "child" / "provided.json").read_text()
 
 
+def test_a_folder_named_child_deeper_down_is_this_projects_rtl(loop_proj):
+    """M5: only the registry's folder (`child/` at the top of the RTL folder) is left out; a folder named child deeper down is this project's
+    own RTL, kept and restored like the rest."""
+    rtl = loop_proj.rtl_dir
+    (rtl / "ip" / "child").mkdir(parents=True)
+    (rtl / "ip" / "child" / "m_x.sv").write_text("module m_x; endmodule\n")
+    dest = loop._keep_best(loop_proj, loop.Round(0, 1, 1, 0.0))
+    assert (dest / "ip" / "child" / "m_x.sv").read_text() == "module m_x; endmodule\n"
+    (rtl / "ip" / "child" / "m_x.sv").write_text("module m_x; // changed\nendmodule\n")
+    loop.restore_best(loop_proj)
+    assert (rtl / "ip" / "child" / "m_x.sv").read_text() == "module m_x; endmodule\n"
+
+
 def test_the_loop_stops_at_the_spend_limit_before_a_new_round(loop_proj):
     res = run_loop(loop_proj, max_cost_usd=0.0)
     assert res.stopped == "spend limit" and [r.number for r in res.rounds] == [0] and not res.ok

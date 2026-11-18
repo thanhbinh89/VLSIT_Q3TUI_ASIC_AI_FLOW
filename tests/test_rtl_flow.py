@@ -334,6 +334,28 @@ def test_style_lint_clean_needs_no_llm(rtl_proj):
     assert eng.by_name["style_lint"].read_json(root / "src" / "rtl" / "style_lint" / "style_report.json")["status"] == "clean"
 
 
+def test_the_style_report_names_the_files_it_leaves_out_only_with_child_projects(rtl_proj):
+    """M5 (R10): a project without child projects keeps its style report as it was (no `provided`, with a CSR of its own or not); with one, the
+    report names every file the check leaves out with its owner (the child project, or "csr")."""
+    import json
+
+    root, eng, fake = rtl_proj
+    _style_setup(root, eng, "module m;\nendmodule\n")
+    rtl, rep = root / "src" / "rtl", root / "src" / "rtl" / "style_lint" / "style_report.json"
+    _run(eng, "style_lint")
+    assert "provided" not in json.loads(rep.read_text())
+    (rtl / "csr").mkdir()
+    (rtl / "csr" / "provided.json").write_text(json.dumps({"m_blk_csr": {"kind": "csr", "parent": "m", "req_ids": [], "instances": []}}))
+    _run(eng, "style_lint")
+    assert "provided" not in json.loads(rep.read_text())
+    (rtl / "cha.sv").write_text("module cha;\nendmodule\n")
+    (rtl / "child").mkdir()
+    (rtl / "child" / "provided.json").write_text(json.dumps({"cha": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "cha.sv",
+                                                                    "unit": "module", "instances": []}}))
+    _run(eng, "style_lint")
+    assert json.loads(rep.read_text())["provided"] == {"m_blk_csr": "csr", "cha": "../cha"}
+
+
 def test_style_lint_hands_fixes_back_to_their_owners(rtl_proj):
     root, eng, fake = rtl_proj
     _style_setup(root, eng)
