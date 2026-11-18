@@ -58,6 +58,7 @@ class Stage:
     deny_dirs: list[Path] = field(default_factory=list)  # never readable, even inside cwd
     write_dirs: list[Path] | None = None  # when set, Edit/Write only inside these
     write_files: list[Path] | None = None  # when set, Edit/Write only these exact files (stricter than write_dirs)
+    read_only_files: dict[Path, str] = field(default_factory=dict)  # file -> why it may not be written (a child project's copy); reads stay allowed
     effort: str | None = None  # overrides the configured effort (e.g. one this stage is known to need)
     timeout_s: int | None = None  # overrides llm.timeout_s (none by default: no time limit)
     # M10 role sessions (llm/roles.py): the role this task runs in, the built-in tools the task itself may use (the
@@ -185,6 +186,8 @@ def check_tool_paths(stage: Stage, tool_input: dict[str, Any], tool_name: str | 
             return f"{raw} may not be modified here; writable: {', '.join(str(d) for d in stage.write_dirs)}"
         if tool_name in WRITE_TOOLS and stage.write_files is not None and p not in [f.resolve() for f in stage.write_files]:
             return f"{raw} may not be written; this task may only write: {', '.join(str(f) for f in stage.write_files)}"
+        if tool_name in WRITE_TOOLS and (why := {f.resolve(): w for f, w in stage.read_only_files.items()}.get(p)):
+            return f"{raw} is read-only: {why}"
     return None
 
 

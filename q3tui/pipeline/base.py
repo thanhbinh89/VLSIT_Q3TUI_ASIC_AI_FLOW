@@ -51,6 +51,11 @@ class StepContext:
             d = s.import_dir(self.engine, "spec")
             if d is not None and s.name != self.emit.step and d not in stage.deny_dirs:
                 stage.deny_dirs.append(d)
+        # files that belong to another project (a child's RTL copies) are read-only for every stage of every step
+        from q3tui.flows.rtl.lib import children
+
+        for f, why in children.protected(self.engine).items():
+            stage.read_only_files.setdefault(f, why)
         # every stage runs at its configured effort (no lowered effort is remembered: it capped rv32im's designer,
         # modeler and debugger at "low" for good after a few long thoughts — Claude Code has no such guard either)
         from q3tui import flows
@@ -182,6 +187,11 @@ class StepDef:
         return False
 
     def missing_input(self, engine: "Engine") -> str | None:
+        return None
+
+    def refuse_change(self, engine: "Engine", text: str) -> str | None:
+        """Why this step cannot act on the change request `text` (e.g. it asks to edit a file owned by another project), else None.
+        `Engine.request_change` then queues nothing and tells the requester the reason."""
         return None
 
     def open_questions(self, engine: "Engine") -> int:

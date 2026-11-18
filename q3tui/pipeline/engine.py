@@ -580,6 +580,10 @@ class Engine:
         step = self.step(name)
         if not step.implemented:
             raise EngineError(f"'{name}' is not implemented yet")
+        why = step.refuse_change(self, text)
+        if why:
+            self.bus.emit("warning", name, message=f"change request refused: {why}")
+            return f"refused: {why}"
         self.state.feedback.setdefault(name, []).append(text.strip())
         if self.gate_required(step):
             self.state.gates[name] = GateRecord(status="open")

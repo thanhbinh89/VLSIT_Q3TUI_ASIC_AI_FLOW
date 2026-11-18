@@ -567,6 +567,8 @@ class Assistant:
         write_json(self.session_file, {})
 
     async def ask(self, text: str, emit: StepEmitter, context: str | None = None) -> str:
+        from q3tui.flows.rtl.lib import children
+
         project = self.host.engine.project
         stage = Stage(
             name="assistant",
@@ -579,6 +581,7 @@ class Assistant:
             resume=self.session_id,
             deny_dirs=[project.state_dir],
             write_dirs=[project.spec_dir, project.schemas_dir, project.src_dir],
+            read_only_files=children.protected(self.host.engine),
         )
         result = await runtime.run_stage(stage, project.cfg, emit)
         if result.session_id:

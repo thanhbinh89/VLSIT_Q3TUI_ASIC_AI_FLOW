@@ -412,3 +412,53 @@ def test_units_by_owner_come_from_the_child_filelists(tmp_path):
     par, project, rtl = _par(tmp_path)
     assert children.units_by_owner(par, ["../npu_core", "../cha", "../nowhere", "."]) == {
         "m_pe_top": "../npu_pe", "m_core_top": "../npu_core", "m_cha_top": "../cha", "m_gone": "../cha"}
+
+
+def test_no_stage_may_write_a_child_file(tmp_path):
+    from q3tui.llm.runtime import Stage, check_tool_paths
+
+    st = Stage(name="s", system_prompt="", prompt="", cwd=tmp_path,
+               read_only_files={tmp_path / "src/rtl/m_cha_top.sv": "a file of the child project ../cha"})
+    assert "read-only" in check_tool_paths(st, {"file_path": "src/rtl/m_cha_top.sv"}, "Edit")
+    assert check_tool_paths(st, {"file_path": "src/rtl/m_cha_top.sv"}, "Read") is None
+
+
+def test_every_stage_of_a_step_gets_the_copies_as_read_only(tmp_path, monkeypatch):
+    import anyio
+
+    from q3tui.llm import runtime
+    from q3tui.llm.runtime import Stage
+    from q3tui.pipeline.base import StepContext
+    from tests.fakes import FakeLLM
+
+    root = tmp_path / "par"
+    (root / "src" / "rtl" / "child").mkdir(parents=True)
+    (root / "q3tui.yaml").write_text("pipeline: {flow: spec}\n")
+    (root / "src/rtl/m_cha_top.sv").write_text(CHA)
+    (root / "src/rtl/child/provided.json").write_text(json.dumps({"m_cha_top": {"kind": "child", "owner": "../cha", "file": "m_cha_top.sv"}}))
+    fake = FakeLLM()
+    monkeypatch.setattr(runtime, "run_stage", fake)
+    eng = Engine(Project.open(root))
+    anyio.run(lambda: StepContext(eng, eng.bus.scoped("spec")).llm(Stage(name="x", system_prompt="", prompt="", cwd=eng.project.root)))
+    assert eng.project.rtl_dir / "m_cha_top.sv" in fake.calls[-1].read_only_files
+
+
+def test_a_step_can_refuse_a_change_request(tmp_path):
+    from q3tui.pipeline.base import StepDef
+
+    class Refusing(StepDef):
+        name = kind = "s"
+
+        def refuse_change(self, engine, text):
+            return "it is a child file" if text.startswith("[s:ro]") else None
+
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "q3tui.yaml").write_text("{}\n")
+    eng = Engine(Project.open(root), steps=[Refusing()])
+    seen = []
+    eng.bus.subscribe(seen.append)
+    assert eng.request_change("s", "[s:ro] edit it") == "refused: it is a child file"
+    assert not eng.state.feedback.get("s")
+    assert any(e.kind == "warning" and "change request refused: it is a child file" in e.data["message"] for e in seen)
+    assert eng.request_change("s", "other").startswith("queued")
