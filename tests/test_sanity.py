@@ -444,6 +444,49 @@ async def test_a_cdc_fix_inside_a_child_module_is_not_handed_off(proj, monkeypat
     assert not other.state.feedback.get("rtl")
 
 
+_BLK_CHILD = {"blk": {"kind": "child", "owner": "../blk_ip", "child": "../blk_ip", "file": "blk.sv", "unit": "module", "instances": []}}
+
+
+async def test_a_stored_fix_on_a_child_module_is_not_handed_off(proj, monkeypatch):
+    """The R3 safety net: a `fix_rtl` decided before the module became a child's (stored in the waivers file) is never sent."""
+    from q3tui.llm import runtime
+
+    (proj.root / "flows").mkdir(exist_ok=True)
+    (proj.root / "flows" / "owner.yaml").write_text("name: owner\nsteps:\n  - {id: spec, kind: reads}\n  - {id: rtl, kind: reads, deps: [spec]}\n")
+    _tools(proj.root, extra="  step_options:\n    cdc_waivers:\n      handoff_flow: owner\n    rdc_waivers:\n      handoff_flow: owner\n")
+    monkeypatch.setattr(runtime, "run_stage", ReviewLLM(_decide))
+    eng = Engine(Project.open(proj.root))
+    await eng.run(yes=True, stop="cdc_waivers")
+    assert json.loads((proj.schemas_dir / "cdc_waivers.json").read_text())["items"][1]["action"] == "fix_rtl"  # (stored, no registry yet)
+    (proj.root / "src" / "rtl" / "child").mkdir()
+    (proj.root / "src" / "rtl" / "child" / "provided.json").write_text(json.dumps(_BLK_CHILD))
+    eng = Engine(Project.open(proj.root))
+    with pytest.raises(EngineError, match="no fix to hand off"):
+        Ops(eng).run_action("sanity_handoff", ids="cdc:V2")
+    assert not Engine(proj, flow=flows.load_flow("owner", proj.root)).state.feedback.get("rtl")
+    assert json.loads((proj.schemas_dir / "cdc_waivers.json").read_text())["items"][1].get("handed_off") is None
+
+
+async def test_a_damaged_child_registry_stops_the_review_and_the_handoff(proj, monkeypatch):
+    from q3tui.llm import runtime
+
+    _tools(proj.root, extra="  step_options:\n    cdc_waivers:\n      handoff_flow: rtl\n")
+    monkeypatch.setattr(runtime, "run_stage", ReviewLLM(_decide))
+    eng = Engine(Project.open(proj.root))
+    await eng.run(yes=True, stop="cdc_waivers")  # (a plan exists)
+    (proj.root / "src" / "rtl" / "child").mkdir()
+    (proj.root / "src" / "rtl" / "child" / "provided.json").write_text("{not json")
+    eng = Engine(Project.open(proj.root))
+    with pytest.raises(EngineError, match="provided.json"):
+        Ops(eng).run_action("sanity_handoff")
+    from q3tui.pipeline.base import StepFailed
+
+    fresh = Engine(Project.open(proj.root))
+    ctx = type("Ctx", (), {"engine": fresh, "project": fresh.project, "regenerate": False})()
+    with pytest.raises(StepFailed, match="provided.json"):  # (the review's run, called as the engine does)
+        await fresh.by_name["cdc_waivers"].run(ctx)
+
+
 async def test_the_prompt_lists_the_child_modules_and_the_childs_reviewed_waivers(proj, monkeypatch):
     from q3tui.llm import runtime
 
