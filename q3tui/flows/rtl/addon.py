@@ -126,7 +126,7 @@ def register(api) -> None:
         step = next((s for s in eng.steps if s.name == "format"), None)
         if step is None:
             raise EngineError("this flow has no format step")
-        problem = step.tool_problem(eng, "verible_format")
+        problem = step.child_registry_problem(eng) or step.tool_problem(eng, "verible_format")  # (a damaged registry: child copies would look like own files)
         if problem:
             raise EngineError(problem)
         every = step.rtl_files(eng)

@@ -1031,3 +1031,19 @@ def test_a_damaged_child_registry_does_not_crash_rtl_files_and_stops_the_steps(t
     for name in ("format", "style_lint", "smoke"):
         assert reg.name in eng.by_name[name].missing_input(eng) and "damaged" in eng.by_name[name].missing_input(eng)
     assert {f.stem for f in eng.by_name["format"].rtl_files(eng)} == {"m_cha_top", "m_chb_top", "m_par_top"}  # (falls back to the csr set)
+
+
+def test_format_now_refuses_with_a_damaged_child_registry(tmp_path, tools_dir, llm):
+    """A user-triggered format must not reformat the child copies when the registry that names them cannot be read."""
+    from q3tui.pipeline.engine import EngineError
+
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    rtl = eng.project.rtl_dir
+    children.registry_file(rtl).write_text("{not json")
+    before = {f.name: f.read_bytes() for f in rtl.glob("*.sv")}
+    with pytest.raises(EngineError, match="provided.json"):
+        Ops(eng).run_action("format_now")
+    assert {f.name: f.read_bytes() for f in rtl.glob("*.sv")} == before
