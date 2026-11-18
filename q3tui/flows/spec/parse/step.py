@@ -5,10 +5,15 @@ LLM: one read-only stage (`parse_spec`) returns the requirements, parameters, co
 assigns / keeps the ids (an unchanged requirement keeps its id), scores ambiguity into questions (kind `spec_gap`; blocking
 from 0.6; asked up to 3 rounds, then `needs_human_decision` and a blocking keep / delete / split question), derives the
 mapping, validates against structured_spec_schema.json and renders `structured_spec.md` for review.
+
+With child projects (`pipeline.step_options.rtl.child_projects`, flows/rtl/lib/children.py) the parent's own spec stays the module
+map: `fit_to_children` (code) keeps its top, marks the child modules `provided_by` and moves their requirements to the parent module
+that instantiates them; the imported RTL's design (`fit_to_design`) is not applied then.
 """
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Literal
@@ -20,6 +25,7 @@ from q3tui.pipeline.base import StepContext, StepFailed
 from q3tui.core.importer import facts_block
 from q3tui.core.project import sha256_file, sha256_json
 from q3tui.steps.common import Question, QuestionOption, assign_question_ids, drop_settled, load_answers, settled_block, spec_block
+from q3tui.flows.rtl.lib import children
 from q3tui.flows.spec.lib import artifacts
 from q3tui.flows.spec.parse import task as parse_prompts
 from q3tui.flows.spec.lib.base import VlsitStep
@@ -207,6 +213,73 @@ def fit_to_design(data: dict, design: dict) -> list[str]:
     return warnings
 
 
+def fit_to_children(data: dict, child: dict[str, str]) -> list[str]:
+    """With child projects the parent's spec stays the module map (`child`: unit -> owner label, children.units_by_owner). A requirement
+    on a child module goes to the own module that instantiates it (walking up through child modules; the top when none does), so REQ tags
+    land only in the parent's own modules; a child `top_module` is replaced by the own root. Child modules get `provided_by`. Pure; returns
+    warnings (one per moved requirement, exactly worded, so a rerun on an already fitted result says nothing)."""
+    mods = data["modules"]
+    own = [m["name"] for m in mods if m["name"] not in child]
+    parents: dict[str, list[str]] = {}
+    for m in mods:
+        for i in m.get("instances", []):
+            parents.setdefault(i, []).append(m["name"])
+
+    def above(name: str) -> set[str]:
+        seen: set[str] = set()
+        todo = [name]
+        while todo:
+            for p in parents.get(todo.pop(), []):
+                if p not in seen:
+                    seen.add(p)
+                    todo.append(p)
+        return seen
+
+    warnings: list[str] = []
+    top = data["metadata"]["top_module"]
+    if not own:
+        if any(r["rtl_modules"] and any(u in child for u in r["rtl_modules"]) for r in data["requirements"]) or top in child:
+            warnings.append("the spec names no module of its own (only modules of the child projects): the top and the requirements stay as they are")
+    else:
+        if top in child:
+            roots = [n for n in own if n not in parents]
+            root = next((n for n in roots if n in above(top)), None) or (roots or own)[0]
+            warnings.append(f"the top module {top} is a module of the child project {child[top]}: the top is now {root}")
+            top = data["metadata"]["top_module"] = root
+
+        def target(unit: str) -> str:
+            todo, seen = [unit], {unit}
+            while todo:
+                nxt = []
+                for u in todo:
+                    for p in parents.get(u, []):
+                        if p in seen:
+                            continue
+                        seen.add(p)
+                        if p not in child:
+                            return p
+                        nxt.append(p)
+                todo = nxt
+            return top
+
+        for r in data["requirements"]:
+            moved: list[str] = []
+            for u in r["rtl_modules"]:
+                if u in child:
+                    t = target(u)
+                    warnings.append(f"{r['req_id']} maps to {u}, a module of the child project {child[u]}: moved to {t}")
+                    moved.append(t)
+                else:
+                    moved.append(u)
+            r["rtl_modules"] = list(dict.fromkeys(moved))
+    for m in mods:
+        if m["name"] in child:
+            m["provided_by"] = child[m["name"]]
+        m["req_ids"] = [r["req_id"] for r in data["requirements"] if m["name"] in r["rtl_modules"]]
+    data["module_order"] = modules_leaves_first(data)
+    return warnings
+
+
 def _strip_private(data: dict) -> dict:
     for r in data["requirements"]:
         for k in [k for k in r if k.startswith("_")]:
@@ -255,7 +328,8 @@ class ParseStep(VlsitStep):
 
     def inputs(self, engine) -> list[Path]:
         imported = engine.import_record_path("rtl")  # (the imported RTL's module map; only once there is one)
-        return [*engine.project.spec_documents(), self._q_paths(engine)[1], *([imported] if imported.is_file() else [])]
+        kids = [c.filelist for c in children.resolve(engine.project.root, children.configured(engine))]  # (a new child module: parse again)
+        return [*engine.project.spec_documents(), self._q_paths(engine)[1], *([imported] if imported.is_file() else []), *kids]
 
     @staticmethod
     def _design(engine) -> dict:
@@ -292,9 +366,21 @@ class ParseStep(VlsitStep):
         answers = load_answers(self._q_paths(engine)[1])
         new_answers = self._answers_to_apply(engine, meta)
         docs = project.spec_documents()
-        design = self._design(engine)
+        child = children.units_by_owner(project.root, children.configured(engine))
+        design = {} if child else self._design(engine)  # (with child projects the parent's own spec is the module map)
         sig = sha256_json({"spec": [sha256_file(p) for p in docs], "answers": answers, **({"design": design} if design else {})})
         if previous is not None and meta.get("sig") == sig and not ctx.feedback and not artifacts.validate(self.artifact, previous):
+            if child:  # (the children's modules may have changed: code only, no LLM)
+                fitted = copy.deepcopy(previous)
+                warnings = fit_to_children(fitted, child)
+                if self._content(fitted) != self._content(previous):
+                    for w in warnings:
+                        ctx.emit("warning", message=w)
+                    engine.project.backup([p for p in self.outputs(engine)])
+                    artifacts.write(project, self.artifact, fitted)
+                    self._md(engine).write_text(render_md(fitted))
+                    ctx.emit("log", message="the child projects' modules changed: the module map is updated")
+                    return
             ctx.unchanged = True
             ctx.emit("log", message="the spec and the answers are as when the requirements were extracted: nothing to do")
             return
@@ -325,6 +411,8 @@ class ParseStep(VlsitStep):
         data, warnings = assemble(parsed, previous, meta, decided)
         if design:
             warnings += fit_to_design(data, design)
+        if child:
+            warnings += fit_to_children(data, child)
         for w in warnings:
             ctx.emit("warning", message=w)
         if len(data["requirements"]) < 10:

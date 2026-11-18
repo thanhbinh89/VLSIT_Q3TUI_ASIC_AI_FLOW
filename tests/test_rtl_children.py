@@ -861,3 +861,119 @@ def test_child_packages_and_interfaces_are_linted_with_the_module_using_them_and
     run_step(eng, "rtl")
     first, second = calls(llm, "rtl_m_par_top")
     assert "`chp_types` changed" in second.prompt and "`m_chp_top` changed" not in second.prompt
+
+
+# -- parse keeps the parent's spec (R6, T4) ---------------------------------------------------------------------
+
+@pytest.fixture
+def parse_llm(monkeypatch):
+    """The fake LLM of tests/test_spec_parse_config.py (its `llm` fixture is the rtl one here)."""
+    from q3tui.llm import runtime
+    from tests import vlsit_fakes
+    from tests.fakes import FakeLLM
+    from tests.test_spec_parse_config import VlsitFake
+
+    fake = FakeLLM()
+    vf = VlsitFake()
+    saved = list(vlsit_fakes.HANDLERS)
+    vlsit_fakes.HANDLERS.clear()
+    vlsit_fakes.register(vf)
+    fake.vf = vf
+    monkeypatch.setattr(runtime, "run_stage", fake)
+    yield fake
+    vlsit_fakes.HANDLERS[:] = saved
+
+
+def _par_spec(**over) -> dict:
+    from tests.test_spec_parse_config import _spec
+
+    base = _spec(ip_name="par", top_module="m_par_top",
+                 requirements=[{"text": "The counter shall count enabled cycles.", "category": "functional", "rtl_modules": ["m_cha_top"]},
+                               {"text": "The parent shall wrap the counter.", "category": "functional", "rtl_modules": ["m_par_top"]}],
+                 parameters=[], constraints=[],
+                 modules=[{"name": "m_par_top", "description": "top", "instances": ["m_cha_top"]},
+                          {"name": "m_cha_top", "description": "counter"}])
+    base.update(over)
+    return base
+
+
+def _parse_project(tmp_path) -> Engine:
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA})
+    par = tmp_path / "par"
+    (par / "spec").mkdir(parents=True)
+    (par / "q3tui.yaml").write_text("pipeline: {flow: spec, step_options: {rtl: {child_projects: [../cha]}}}\n")
+    (par / "spec" / "spec.md").write_text("# Par\n\nThe parent wraps the counter of ../cha.\n")
+    return Engine(Project.open(par))
+
+
+def test_fit_to_children_moves_requirements_and_keeps_the_top():
+    from q3tui.flows.spec.parse.step import fit_to_children, modules_leaves_first
+
+    def req(rid, mods):
+        return {"req_id": rid, "rtl_modules": list(mods)}
+
+    data = {"metadata": {"top_module": "m_cha_top"},
+            "requirements": [req("REQ-001", ["m_cha_sub"]), req("REQ-002", ["m_cha_top", "m_par_top"]), req("REQ-003", ["m_par_top"])],
+            "modules": [{"name": "m_par_top", "instances": ["m_wrap"], "req_ids": []},
+                        {"name": "m_wrap", "instances": ["m_cha_top"], "req_ids": []},
+                        {"name": "m_cha_top", "instances": ["m_cha_sub"], "req_ids": []},
+                        {"name": "m_cha_sub", "instances": [], "req_ids": []}]}
+    data["module_order"] = modules_leaves_first(data)
+    warnings = fit_to_children(data, {"m_cha_top": "../cha", "m_cha_sub": "../cha"})
+    assert data["metadata"]["top_module"] == "m_par_top"
+    reqs = {r["req_id"]: r["rtl_modules"] for r in data["requirements"]}
+    assert reqs == {"REQ-001": ["m_wrap"], "REQ-002": ["m_wrap", "m_par_top"], "REQ-003": ["m_par_top"]}
+    assert "REQ-001 maps to m_cha_sub, a module of the child project ../cha: moved to m_wrap" in warnings
+    assert "REQ-002 maps to m_cha_top, a module of the child project ../cha: moved to m_wrap" in warnings
+    assert len(warnings) == 3  # (+ the top replaced)
+    mods = {m["name"]: m for m in data["modules"]}
+    assert mods["m_cha_top"]["provided_by"] == "../cha" and mods["m_cha_sub"]["provided_by"] == "../cha"
+    assert "provided_by" not in mods["m_par_top"]
+    assert mods["m_wrap"]["req_ids"] == ["REQ-001", "REQ-002"] and mods["m_par_top"]["req_ids"] == ["REQ-002", "REQ-003"]
+    assert mods["m_cha_top"]["req_ids"] == [] and mods["m_cha_sub"]["req_ids"] == []
+    assert data["module_order"] == modules_leaves_first(data)
+
+
+def test_fit_to_children_without_own_modules_keeps_the_top_and_warns():
+    from q3tui.flows.spec.parse.step import fit_to_children
+
+    data = {"metadata": {"top_module": "m_cha_top"}, "requirements": [{"req_id": "REQ-001", "rtl_modules": ["m_cha_top"]}],
+            "modules": [{"name": "m_cha_top", "instances": [], "req_ids": ["REQ-001"]}], "module_order": ["m_cha_top"]}
+    warnings = fit_to_children(data, {"m_cha_top": "../cha"})
+    assert data["metadata"]["top_module"] == "m_cha_top"
+    assert any("no module of its own" in w for w in warnings)
+
+
+def test_parse_with_child_projects_keeps_the_parents_top(tmp_path, parse_llm):
+    """T4: an import record whose design has the child's top does not replace the parent's module map."""
+    eng = _parse_project(tmp_path)
+    eng.import_record_path("rtl").parent.mkdir(parents=True, exist_ok=True)
+    eng.import_record_path("rtl").write_text(json.dumps({"source": "x", "files": {}, "design": {
+        "top": "m_cha_top", "modules": {"m_cha_top": {"file": "m_cha_top.sv", "kind": "module", "ports": [], "instances": []}}}}))
+    parse_llm.vf.parsed.append(_par_spec())
+    seen = _events(eng)
+    import anyio
+
+    anyio.run(lambda: eng.run_step(eng.by_name["parse"]))
+    data = artifacts.read(eng.project, "structured_spec.json")
+    assert data["metadata"]["top_module"] == "m_par_top"
+    assert [r["rtl_modules"] for r in data["requirements"]][0] == ["m_par_top"]
+    assert any("REQ-001 maps to m_cha_top, a module of the child project ../cha: moved to m_par_top" in w for w in _said(seen, "warning"))
+    assert {m["name"]: m.get("provided_by") for m in data["modules"]} == {"m_par_top": None, "m_cha_top": "../cha"}
+
+
+def test_a_new_child_module_reruns_parse_without_the_llm(tmp_path, parse_llm):
+    import anyio
+
+    eng = _parse_project(tmp_path)
+    parse_llm.vf.parsed.append(_par_spec())
+    anyio.run(lambda: eng.run_step(eng.by_name["parse"]))
+    assert len(calls(parse_llm, "parse_spec")) == 1
+    cha = tmp_path / "cha" / "src" / "rtl"
+    (cha / "m_cha_sub.sv").write_text("module m_cha_sub (input logic i_a, output logic o_a);\n  assign o_a = i_a;\nendmodule\n")
+    (cha / "filelist.f").write_text("src/rtl/m_cha_top.sv\nsrc/rtl/m_cha_sub.sv\n")
+    assert eng.evaluate(eng.by_name["parse"]).status == "stale"
+    anyio.run(lambda: eng.run_step(eng.by_name["parse"]))
+    assert len(calls(parse_llm, "parse_spec")) == 1
+    data = artifacts.read(eng.project, "structured_spec.json")
+    assert {m["name"] for m in data["modules"]} >= {"m_par_top", "m_cha_top"}
