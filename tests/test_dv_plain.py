@@ -925,6 +925,54 @@ def test_an_rtl_bug_in_a_child_module_is_not_handed_over(tmp_path, tools_dir, ll
     assert "## RTL of child projects" in stage.prompt
 
 
+def test_an_rtl_bug_the_triage_puts_in_no_module_goes_to_an_own_module(tmp_path, tools_dir, llm):
+    """Ruling 13 (I1): a verdict whose module is none of the design's (an instance name) is handed over for one of this project's own modules,
+    never for a child project's module that sorts first by name (the rtl flow would refuse it, and the step said it had handed it over)."""
+    from q3tui import flows
+
+    eng = failing(tmp_path, tools_dir, llm, [{"id": "TC-002", "verdict": "rtl_bug", "module": "u_leaf_b", "summary": "b is not registered",
+                                              "request": "register b on the clock edge"}])
+    rtl = tmp_path / "src" / "rtl"
+    (rtl / "a_child.sv").write_text("module a_child(input logic clk);\nendmodule\n")  # (a child project's module, first by name)
+    (rtl / "child").mkdir(parents=True, exist_ok=True)
+    (rtl / "child" / "provided.json").write_text(json.dumps(
+        {"a_child": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "a_child.sv", "unit": "module", "instances": []}}))
+    eng = Engine(Project.open(tmp_path))
+    with pytest.raises(StepFailed, match="handed to the rtl flow") as exc:
+        run_step(eng, "simulate")
+    assert "(leaf_a → rtl)" in str(exc.value)
+    assert Engine(Project.open(tmp_path), flow=flows.load_flow("rtl")).state.feedback.get("rtl") == [
+        "[rtl:leaf_a] From the simulation of the testbench (TC-002): b is not registered register b on the clock edge"]
+
+
+def test_an_rtl_fix_the_rtl_flow_refuses_is_a_question_not_handed_over(tmp_path, tools_dir, llm):
+    """Ruling 13 (I1): the rtl flow refuses the fix (its module is a child project's by its filelist: the registry is not written yet, or was
+    deleted). The step does not say it handed it over: it asks, naming the child project, and says the refusal itself (the rtl flow's engine,
+    whose warning it was, is not this run's)."""
+    from q3tui import flows
+    from tests.test_rtl_children import make_child
+
+    eng = failing(tmp_path, tools_dir, llm, [{"id": "TC-002", "verdict": "rtl_bug", "module": "m_cha_top", "summary": "the child drops a beat",
+                                              "request": "keep the beat"}])
+    cfg = tmp_path / "q3tui.yaml"
+    cfg.write_text(cfg.read_text().replace("pipeline: {flow: t}", "pipeline: {flow: t, step_options: {rtl: {child_projects: [ip/cha]}}}", 1))
+    text = "module m_cha_top(input logic clk);\nendmodule\n"
+    make_child(tmp_path / "ip", "cha", {"m_cha_top.sv": text})
+    (tmp_path / "src" / "rtl" / "m_cha_top.sv").write_text(text)  # (an earlier copy: no registry names it)
+    eng = Engine(Project.open(tmp_path))
+    seen = []
+    eng.bus.subscribe(seen.append)
+    with pytest.raises(StepFailed, match="need your decision") as exc:
+        run_step(eng, "simulate")
+    assert "handed to the rtl flow" not in str(exc.value)
+    (q,) = eng.by_name["simulate"].question_list(eng)
+    assert "a module of the child project ip/cha" in q["question"] and q["options"][0]["label"] == "Fix it in ip/cha (its own flows), then run this project again"
+    assert not Engine(Project.open(tmp_path), flow=flows.load_flow("rtl")).state.feedback.get("rtl")
+    assert not [h for h in eng.state.step_meta["simulate"].get("history", []) if h["key"].startswith("rtl_bug|")]  # (not handed over: not "tried")
+    assert any(e.kind == "warning" and "simulate TC-002: change request refused: `m_cha_top` belongs to the child project ip/cha" in e.data["message"]
+               for e in seen)
+
+
 # -- the test programs: prepare writes and builds them, simulate hands it the files a test could not read ------------------------------------------
 
 FLOW_PREP = """name: t

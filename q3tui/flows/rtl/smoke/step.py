@@ -3,8 +3,9 @@
 Independence (as the VLSIT `tb`): the writer sees the spec, the requirements and the configuration — the RTL files are denied to it. It works with
 a skill (smoke-testbench) and the tools `smoke_compile` / `smoke_run`, so it iterates by itself. Code decides the result: it compiles and runs the
 testbench again and reads the `SMOKE_RESULT` lines. A failure goes to a second LLM (skill smoke-triage) that may read everything; code dispatches
-its verdicts — an RTL bug to `rtl` as `[rtl:<module>] …` (not one in a child project's module: read-only here, it becomes a question about
-its owner), a testbench bug back to this step, a spec issue / unsure as a blocking question — and the
+its verdicts — an RTL bug to `rtl` as `[rtl:<module>] …` (one naming no module of the design: to one of this project's own; not one in a child
+project's module, nor one the rtl step refuses: read-only here, it becomes a question about its owner, no round), a testbench bug back to this
+step, a spec issue / unsure as a blocking question — and the
 engine's fix loop runs the chain again, bounded by `options.max_rounds`. Update, not re-run: the testbench is rewritten only when what it was built
 from (the spec, the requirements, the parameters, your answers) changed, or a change request names it; a changed RTL only compiles and runs again."""
 
@@ -206,11 +207,13 @@ class Step(RtlFlowStep):
         for h in history:
             seen[h["key"]] = seen.get(h["key"], 0) + 1
         child_units = children.read_registry(self.rtl_dir(engine))
+        own = sorted(modules - set(child_units))  # (a fix for a module the triage did not name rightly goes to one of these: never to a child's)
+        start = len(history)  # (this round's entries follow: a fix the rtl step refuses takes its own out again)
         for v in verdicts:
             if v.verdict == "rtl_bug" and v.module in child_units:  # a child project's module is read-only here: its owner fixes it, never `rtl`
                 v = children.child_question(v, child_units[v.module])
             report["triage"].append(v.model_dump())
-            unit = v.module if v.module in modules else next(iter(sorted(modules)), "")
+            unit = v.module if v.module in modules else next(iter(own), "")
             key = f"{v.verdict}|{unit}|{v.id}"
             # a bug whose fix was written into the summary (the request left empty) is still a fix to hand over, not a question for you
             fix = v.request.strip() or v.summary.strip()
@@ -230,11 +233,19 @@ class Step(RtlFlowStep):
                 dispatched += 1
             else:
                 by_decision.setdefault(v.decision.strip().lower() or v.id, []).append(v)
-        asks += [vs[0].question("Smoke test", [v.id for v in vs]) for vs in by_decision.values()]
         for unit, vs in by_module.items():
-            engine.request_change("rtl", scoped("rtl", unit, f"From the smoke test ({', '.join(v.id for v in vs)}): " + " | ".join(f"{v.summary} {v.request}" for v in vs)))
+            said = engine.request_change("rtl", scoped("rtl", unit, f"From the smoke test ({', '.join(v.id for v in vs)}): " + " | ".join(f"{v.summary} {v.request}" for v in vs)))
+            if said.startswith("refused:"):  # (a child project's module: the rtl step said why) never handed back, so no round: a question
+                gone = {f"rtl_bug|{unit}|{v.id}" for v in vs}
+                history[start:] = [h for h in history[start:] if h["key"] not in gone]
+                entry = children.entry_for(engine, unit, child_units)
+                for v in vs:
+                    q = children.child_question(v.model_copy(update={"module": unit}), entry)
+                    by_decision.setdefault(q.decision.strip().lower(), []).append(q)
+                continue
             ctx.emit("log", message=f"smoke {', '.join(v.id for v in vs)}: RTL bug → rtl ({unit}): {vs[0].summary[:100]}")
             dispatched += 1
+        asks += [vs[0].question("Smoke test", [v.id for v in vs]) for vs in by_decision.values()]
         answers = load_answers(self._q_paths(engine)[1])
         kept = [q for q in self.questions_list(engine) if q.id in answers]
         self.save_questions(engine, [*kept, *assign_question_ids(asks, kept, "SM", taken=set(answers))])

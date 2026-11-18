@@ -26,7 +26,8 @@ place and keeps the change as a patch that outlives the next generation), unless
 is a `spec_issue` with the choices.
 
 A module a child project provides (`src/rtl/child/provided.json`) is read-only here: an `rtl_bug` in one becomes a blocking question naming the child (decision `child:<owner>`, the same
-helper as the smoke triage's), never a change request for the rtl step.
+helper as the smoke triage's), never a change request for the rtl step. A verdict whose module is none of the design's goes to one of this project's own modules; a fix the rtl flow
+refuses all the same (its module is a child's: the rtl step said so) is that question too, never counted as handed over.
 
 Every verdict is in `schemas/dv_triage.json`. Models of the LLM's answer: `flows/rtl/lib/models.Verdict` (the same as the smoke triage's)."""
 
@@ -234,6 +235,7 @@ async def handle_failures(step, ctx: StepContext, failures: list[dict], rtl_dir:
         children_here = children.read_registry(rtl_dir)
     except children.ChildError as exc:
         raise StepFailed(str(exc)) from exc
+    own = sorted(modules - set(children_here))  # (an RTL fix for a module the triage did not name rightly goes to one of these: never to a child's)
     known = {f["id"] for f in failures}
     asks: list[Question] = []
     to_tb = to_prep = 0  # (prepare_bug: the test's programs / data, src/sw — the prepare step builds them again, then simulate runs)
@@ -249,7 +251,7 @@ async def handle_failures(step, ctx: StepContext, failures: list[dict], rtl_dir:
         if v.verdict == "rtl_bug" and v.module in children_here:  # (read-only here: the child's own flows fix it, so it is a question, not a change request)
             v = children.child_question(v, children_here[v.module])
         report["verdicts"].append(v.model_dump())
-        unit = v.module if v.module in modules else next(iter(sorted(modules)), "")
+        unit = v.module if v.module in modules else next(iter(own), "")
         top = v.verdict == "tb_bug" and kind == "plain" and v.module.strip().lower().removesuffix(".sv") in ("top", "tb_top")  # (the shared tb_top, not the test)
         key = f"{v.verdict}|{unit if v.verdict == 'rtl_bug' else 'top' if top else v.id}|{v.id}"
         if v.verdict == "prepare_bug" and not prepare:  # (no prepare step here, or a UVM testbench: nobody to hand it to — a question)
@@ -294,21 +296,38 @@ async def handle_failures(step, ctx: StepContext, failures: list[dict], rtl_dir:
     asks += [vs[0].question("Test", [v.id for v in vs]) for vs in by_decision.values()]
     answers = load_answers(step._q_paths(engine)[1])
     kept = [q for q in step.questions_list(engine) if q.id in answers]
-    step.save_questions(engine, [*kept, *assign_question_ids(asks, kept, "SIM", taken=set(answers))])
+    saved = [*kept, *assign_question_ids(asks, kept, "SIM", taken=set(answers))]
+    step.save_questions(engine, saved)
     write_json(lay.schemas / TRIAGE_JSON, report)
     if to_tb or to_prep:
         meta["loop"], meta["rounds"] = True, rounds + 1  # the engine updates tb / prepare on the change requests, then runs simulate again
     # the hand-over to the other flow last: it saves this engine's state, lets the other flow's engine write the change request into the same file, and reads it back
     handed: list[str] = []
+    refused: dict[str, list[Verdict]] = {}  # (fixes the owner flow's rtl step refused — a child project's module — as questions, by decision)
+    gone: set[str] = set()  # (their history keys: what was refused was never handed over)
     owner = str(tb_opts.get("handoff_flow") or "rtl")
     for unit, vs in by_module.items():
         text = scoped("rtl", unit, f"From the simulation of the testbench ({', '.join(v.id for v in vs)}): " + " | ".join(f"{v.summary} {v.request}{_evidence(v)}" for v in vs)
                       + _module_since_pass(project, since, next((p for p in rtl if p.stem == unit), None), [v.id for v in vs]) + wider.get(unit, ""))
-        owner = _hand_to_rtl_flow(ctx, owner, text)
+        owner, answer = _hand_to_rtl_flow(ctx, owner, text)
+        if answer.startswith("refused:"):  # (its warning went to the other flow's engine, which nobody watches: said here)
+            ctx.emit("warning", message=f"simulate {', '.join(v.id for v in vs)}: change request {answer}")
+            entry = children.entry_for(engine, unit, children_here)
+            for v in vs:
+                q = children.child_question(v.model_copy(update={"module": unit}), entry)
+                refused.setdefault(q.decision.strip().lower(), []).append(q)
+                gone.add(f"rtl_bug|{unit}|{v.id}")
+            continue
         ctx.emit("log", message=f"simulate {', '.join(v.id for v in vs)}: RTL bug → {owner}:rtl ({unit}): {vs[0].summary[:100]}"
                                 + (" — came back after its fix: one wider try instead of a question" if unit in wider else ""))
         handed.append(f"{unit} → {owner}")
     meta = engine.state.step_meta.setdefault(step.name, {})  # (the hand-over reloaded the state: this step's meta is a new object)
+    if refused:  # questions after the triage's own (saved before the hand-over); this round's history entries of those fixes go
+        meta["history"] = [h for h in meta.get("history", []) if not (h["key"] in gone and h.get("round") == rounds + 1 and h.get("rtl") == now_rtl)]
+        more = [q for q in assign_question_ids([vs[0].question("Test", [v.id for v in vs]) for vs in refused.values()], saved, "SIM", taken=set(answers))
+                if q.id not in {s.id for s in saved}]  # (one asked already in the same words is that question)
+        step.save_questions(engine, [*saved, *more])
+        asks += more
     run_owner = bool(handed) and engine.unattended_run() and not stalled
     if run_owner:  # the fix loop runs the owner flow within this run, then tb and simulate on the new RTL
         engine.hand_to_flow(step.name, owner)
@@ -411,8 +430,9 @@ def _child_block(rtl_dir: Path) -> list[str]:
             "`child:<owner>` and say what is wrong (it is fixed in that project). A fault in how this project's own module uses it (connections, parameters) is an rtl_bug of that own module.", ""]
 
 
-def _hand_to_rtl_flow(ctx: StepContext, flow_name: str, text: str) -> str:
-    """A change request for the `rtl` step of the flow that owns the RTL (the way the FPGA flow hands over a PPA fix); returns the flow's name."""
+def _hand_to_rtl_flow(ctx: StepContext, flow_name: str, text: str) -> tuple[str, str]:
+    """A change request for the `rtl` step of the flow that owns the RTL (the way the FPGA flow hands over a PPA fix); returns the flow's name and
+    its engine's answer: "queued …", or "refused: …" (a module of a child project, which no step here changes: the caller asks instead)."""
     from q3tui import flows
     from q3tui.pipeline.engine import Engine
 
@@ -423,6 +443,6 @@ def _hand_to_rtl_flow(ctx: StepContext, flow_name: str, text: str) -> str:
     other = Engine(ctx.project, flow=owner)
     if "rtl" not in other.by_name:
         raise StepFailed(f"flow '{owner.name}' has no step 'rtl' to hand the RTL fix to")
-    other.request_change("rtl", text)
+    said = other.request_change("rtl", text)
     ctx.engine.reload()  # (the change request is in the state now)
-    return owner.name
+    return owner.name, said

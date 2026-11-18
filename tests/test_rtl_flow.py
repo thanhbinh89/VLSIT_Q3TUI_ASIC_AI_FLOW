@@ -768,3 +768,48 @@ def test_an_rtl_bug_in_a_child_module_is_a_question_not_a_fix(smoke_proj):
     qs = [q for q in eng.questions() if q["step"] == "smoke"]
     assert len(qs) == 1 and "../cha" in qs[0]["question"] and qs[0]["options"][0]["label"].startswith("Fix it in ../cha")
     assert not eng.state.feedback.get("rtl")
+
+
+def test_an_rtl_bug_the_triage_puts_in_no_module_goes_to_an_own_module(smoke_proj):
+    """Ruling 13 (I1): a verdict whose module is none of the design's (an instance name) goes to one of this project's own modules, never to a
+    child project's module that sorts first by name: the rtl step would refuse it and the round would be spent without a fix."""
+    import json
+
+    root, eng, fake = smoke_proj
+    rtl = root / "src" / "rtl"
+    (rtl / "m.sv").write_text("module m; // RTL_BUG\nendmodule\n")
+    (rtl / "cha_top.sv").write_text("module cha_top;\nendmodule\n")  # (a child project's module, before `m` by name)
+    (rtl / "child").mkdir()
+    (rtl / "child" / "provided.json").write_text(json.dumps({"cha_top": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "cha_top.sv",
+                                                                         "unit": "module", "instances": []}}))
+    fake.answers["smoke_triage"] = lambda s: SmokeTriage(verdicts=[Verdict(id="S2", verdict="rtl_bug", module="u_m", summary="o_y is off by one",
+                                                                          request="register i_a once")])
+    _run(eng, "smoke")
+    assert eng.state.feedback.get("rtl") == ["[rtl:m] From the smoke test (S2): o_y is off by one register i_a once"]
+    assert eng.state.step_meta["smoke"]["loop"] is True
+
+
+def test_an_rtl_fix_the_rtl_step_refuses_is_a_question_not_a_round(smoke_proj):
+    """Ruling 13 (I1): an RTL fix the rtl step refuses (here the module is a child project's by its filelist: the registry is not written yet, or
+    was deleted) is never counted as handed over: it becomes a question naming the child project, no round is spent, nothing is queued."""
+    from tests.test_rtl_children import make_child
+
+    root, eng, fake = smoke_proj
+    cfg = root / "q3tui.yaml"
+    cfg.write_text(cfg.read_text().replace("pipeline: {flow: rtl}", "pipeline: {flow: rtl, step_options: {rtl: {child_projects: [ip/cha]}}}", 1))
+    bug = "module m_cha_top; // RTL_BUG\nendmodule\n"
+    make_child(root / "ip", "cha", {"m_cha_top.sv": bug})
+    (root / "src" / "rtl" / "m_cha_top.sv").write_text(bug)  # (an earlier copy: no registry names it)
+    eng = Engine(Project.open(root))
+    seen = []
+    eng.bus.subscribe(seen.append)
+    fake.answers["smoke_triage"] = lambda s: SmokeTriage(verdicts=[Verdict(id="S2", verdict="rtl_bug", module="m_cha_top", summary="o_y is off by one",
+                                                                          request="register i_a once")])
+    with pytest.raises(StepFailed, match="needs your decision"):
+        _run(eng, "smoke")
+    (q,) = [q for q in eng.questions() if q["step"] == "smoke"]
+    assert "a module of the child project ip/cha" in q["question"] and q["options"][0]["label"] == "Fix it in ip/cha (its own flows), then run this project again"
+    assert not eng.state.feedback.get("rtl") and eng.state.step_meta["smoke"]["loop"] is False and eng.state.step_meta["smoke"]["rounds"] == 0
+    assert not [h for h in eng.state.step_meta["smoke"]["history"] if h["key"].startswith("rtl_bug|")]  # (not handed back: not "tried")
+    assert any(e.kind == "warning" and "change request refused: `m_cha_top` belongs to the child project ip/cha" in e.data["message"] for e in seen)
+    assert not any("RTL bug → rtl" in e.data.get("message", "") for e in seen)

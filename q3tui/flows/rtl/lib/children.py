@@ -257,6 +257,13 @@ def child_question(v, entry: dict):
         "summary": f"{v.summary} (in `{unit}`, a module of the child project {owner}: read-only here)"})
 
 
+def entry_for(engine, unit: str, registry: dict[str, dict]) -> dict:
+    """The record of a child project's `unit` for `child_question`, when the rtl step refused a change to it: the registry's, else (no copy
+    recorded yet: before the first copy, or after a damaged registry was deleted) its owner as the children's filelists name it, which is how
+    that refusal found it (`units_by_owner`)."""
+    return registry.get(unit) or {"owner": units_by_owner(engine.project.root, configured(engine)).get(unit)}
+
+
 # -- the copy ---------------------------------------------------------------------------------------------------------
 
 def copy(project, rtl_dir: Path, children: list[Child], own: set[str]) -> CopyResult:
