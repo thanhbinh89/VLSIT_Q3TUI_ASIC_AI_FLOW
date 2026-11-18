@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from q3tui.core.project import read_json, write_json
-from q3tui.flows.rtl.lib import csr, rules, verible
+from q3tui.flows.rtl.lib import children, csr, rules, verible
 from q3tui.flows.spec.lib.base import VlsitStep, rules_text
 
 
@@ -18,9 +18,23 @@ class RtlFlowStep(VlsitStep):
         return engine.by_name["rtl"].lay(engine).rtl
 
     def rtl_files(self, engine) -> list[Path]:
-        """The RTL this flow writes (the files the style checks apply to): not the modules the `csr` step provides (generated code)."""
-        own = csr.read_provided(self.rtl_dir(engine))
+        """The RTL this flow writes (the files the style checks apply to): not the modules the `csr` step provides (generated code), nor the
+        copies of child projects' modules (read-only here: their owner formats and lints them). Runs on every TUI refresh, so a damaged child
+        registry falls back to the csr set instead of raising: `child_registry_problem` reports it where a step would run."""
+        try:
+            own = children.read_all_provided(self.rtl_dir(engine))
+        except children.ChildError:
+            own = csr.read_provided(self.rtl_dir(engine))
         return [f for f in verible.rtl_files(self.rtl_dir(engine)) if f.stem not in own]
+
+    def child_registry_problem(self, engine) -> str | None:
+        """The text of a damaged child registry (None when it is fine): the steps that write or judge files wait with it (`missing_input`)
+        rather than run with the child copies taken for their own."""
+        try:
+            children.read_registry(self.rtl_dir(engine))
+        except children.ChildError as exc:
+            return str(exc)
+        return None
 
     def design_files(self, engine) -> list[Path]:
         """The whole design in compile order (the `rtl` step's filelist: the provided modules included); every RTL file when there is none yet."""

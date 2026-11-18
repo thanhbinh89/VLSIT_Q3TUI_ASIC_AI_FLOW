@@ -237,6 +237,26 @@ def read_all_provided(rtl_dir: Path) -> dict[str, dict]:
     return csr.read_provided(rtl_dir) | read_registry(rtl_dir)
 
 
+def child_question(v, entry: dict):
+    """A copy of the verdict `v` (a `Verdict`) that is a question for you instead of a fix: its module is a child project's, read-only here, so
+    no step of this project may change it. `decision` is `child:<owner>` (failures waiting on the same child become one question)."""
+    from q3tui.steps.common import QuestionOption
+
+    unit = v.module
+    owner = entry.get("owner") or entry.get("child") or "?"
+    options = [
+        QuestionOption(label=f"Fix it in {owner} (its own flows), then run this project again",
+                       description="the module belongs to the child project: it is repaired there and copied here again",
+                       impact="complexity: work in the child project; this project stays as it is"),
+        QuestionOption(label=f"This project's use of {unit} is wrong: fix the module that instantiates it",
+                       description="the child module is right as it is: this project's own RTL changes to use it correctly",
+                       impact="complexity: a change in this project's own modules"),
+    ]
+    return v.model_copy(update={
+        "verdict": "unsure", "decision": f"child:{owner}", "request": "", "options": options,
+        "summary": f"{v.summary} (in `{unit}`, a module of the child project {owner}: read-only here)"})
+
+
 # -- the copy ---------------------------------------------------------------------------------------------------------
 
 def copy(project, rtl_dir: Path, children: list[Child], own: set[str]) -> CopyResult:

@@ -748,3 +748,23 @@ def test_the_fix_rounds_are_counted_across_runs_until_the_test_passes(smoke_proj
     (root / "src" / "rtl" / "m.sv").write_text("module m;\nendmodule\n")  # fixed: the test passes, the count starts over
     anyio.run(lambda: eng.run_step(eng.by_name["smoke"], regenerate=True))
     assert eng.state.step_meta["smoke"]["rounds"] == 0
+
+
+def test_an_rtl_bug_in_a_child_module_is_a_question_not_a_fix(smoke_proj):
+    """R3: a child project's module is read-only here: an rtl_bug in it becomes a question about its owner, never a request to `rtl`."""
+    import json
+
+    root, eng, fake = smoke_proj
+    rtl = root / "src" / "rtl"
+    (rtl / "m_cha_top.sv").write_text("module m_cha_top; // RTL_BUG\nendmodule\n")
+    (rtl / "m.sv").write_text("module m; // RTL_BUG\nendmodule\n")
+    (rtl / "child").mkdir()
+    (rtl / "child" / "provided.json").write_text(json.dumps({"m_cha_top": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "m_cha_top.sv",
+                                                                           "unit": "module", "instances": []}}))
+    fake.answers["smoke_triage"] = lambda s: SmokeTriage(verdicts=[Verdict(id="S2", verdict="rtl_bug", module="m_cha_top", summary="o_y is off by one",
+                                                                          request="register i_a once")])
+    with pytest.raises(StepFailed, match="needs your decision"):
+        _run(eng, "smoke")
+    qs = [q for q in eng.questions() if q["step"] == "smoke"]
+    assert len(qs) == 1 and "../cha" in qs[0]["question"] and qs[0]["options"][0]["label"].startswith("Fix it in ../cha")
+    assert not eng.state.feedback.get("rtl")

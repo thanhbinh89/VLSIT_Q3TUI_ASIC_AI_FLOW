@@ -3,7 +3,8 @@
 Independence (as the VLSIT `tb`): the writer sees the spec, the requirements and the configuration — the RTL files are denied to it. It works with
 a skill (smoke-testbench) and the tools `smoke_compile` / `smoke_run`, so it iterates by itself. Code decides the result: it compiles and runs the
 testbench again and reads the `SMOKE_RESULT` lines. A failure goes to a second LLM (skill smoke-triage) that may read everything; code dispatches
-its verdicts — an RTL bug to `rtl` as `[rtl:<module>] …`, a testbench bug back to this step, a spec issue / unsure as a blocking question — and the
+its verdicts — an RTL bug to `rtl` as `[rtl:<module>] …` (not one in a child project's module: read-only here, it becomes a question about
+its owner), a testbench bug back to this step, a spec issue / unsure as a blocking question — and the
 engine's fix loop runs the chain again, bounded by `options.max_rounds`. Update, not re-run: the testbench is rewritten only when what it was built
 from (the spec, the requirements, the parameters, your answers) changed, or a change request names it; a changed RTL only compiles and runs again."""
 
@@ -14,7 +15,7 @@ import anyio
 
 from q3tui.core.project import sha256_file, sha256_json, write_json
 from q3tui.flows import skill_sections
-from q3tui.flows.rtl.lib import csr
+from q3tui.flows.rtl.lib import children, csr
 from q3tui.flows.rtl.lib import skills as skillmod
 from q3tui.flows.rtl.lib import smoke
 from q3tui.flows.rtl.lib.base import RtlFlowStep
@@ -65,6 +66,8 @@ class Step(RtlFlowStep):
         return [*self.outputs(engine), *super().reset_files(engine)]
 
     def missing_input(self, engine) -> str | None:
+        if (bad := self.child_registry_problem(engine)):
+            return bad
         p = engine.project
         if not self.design_files(engine):
             return f"the RTL is needed first ({p.rel(self.rtl_dir(engine))}/: step rtl)"
@@ -202,7 +205,10 @@ class Step(RtlFlowStep):
         seen: dict[str, int] = {}
         for h in history:
             seen[h["key"]] = seen.get(h["key"], 0) + 1
+        child_units = children.read_registry(self.rtl_dir(engine))
         for v in verdicts:
+            if v.verdict == "rtl_bug" and v.module in child_units:  # a child project's module is read-only here: its owner fixes it, never `rtl`
+                v = children.child_question(v, child_units[v.module])
             report["triage"].append(v.model_dump())
             unit = v.module if v.module in modules else next(iter(sorted(modules)), "")
             key = f"{v.verdict}|{unit}|{v.id}"

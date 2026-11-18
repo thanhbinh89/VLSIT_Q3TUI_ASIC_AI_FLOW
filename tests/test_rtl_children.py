@@ -1006,3 +1006,28 @@ def test_a_child_added_later_moves_its_requirements_without_the_llm(tmp_path, pa
     assert {m["name"]: m.get("provided_by") for m in data["modules"]}["m_chb_top"] == "../chb"
     assert any("maps to m_chb_top, a module of the child project ../chb: moved to m_par_top" in w for w in _said(seen, "warning"))
     assert data != before
+
+
+def test_format_and_style_lint_skip_child_files(tmp_path, tools_dir, llm):
+    """T5(c) (R3, R4): format and style_lint see only this project's own file: the child copies are the owner's to format and lint."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    assert sorted(p.stem for p in eng.project.rtl_dir.glob("*.sv")) == ["m_cha_top", "m_chb_top", "m_par_top"]
+    for name in ("format", "style_lint"):
+        assert [f.stem for f in eng.by_name[name].rtl_files(eng)] == ["m_par_top"]
+    assert eng.by_name["style_lint"]._provided(eng) == {"m_cha_top": "../cha", "m_chb_top": "../chb"}
+
+
+def test_a_damaged_child_registry_does_not_crash_rtl_files_and_stops_the_steps(tmp_path, tools_dir, llm):
+    """Ruling 5: rtl_files runs on every TUI refresh (never raises); format / style_lint / smoke wait with the registry's problem."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    reg = children.registry_file(eng.project.rtl_dir)
+    reg.write_text("{not json")
+    for name in ("format", "style_lint", "smoke"):
+        assert reg.name in eng.by_name[name].missing_input(eng) and "damaged" in eng.by_name[name].missing_input(eng)
+    assert {f.stem for f in eng.by_name["format"].rtl_files(eng)} == {"m_cha_top", "m_chb_top", "m_par_top"}  # (falls back to the csr set)

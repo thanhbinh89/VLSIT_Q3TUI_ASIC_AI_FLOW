@@ -54,11 +54,22 @@ class Step(RtlFlowStep):
         return [*self.outputs(engine), *super().reset_files(engine)]
 
     def missing_input(self, engine) -> str | None:
+        if (bad := self.child_registry_problem(engine)):
+            return bad
         if not self.rtl_files(engine):
             return f"the RTL is needed first ({engine.project.rel(self.rtl_dir(engine))}/: step rtl)"
         if not self._flags_file(engine).is_file():
             return "the Verible flags are needed first (step rules: src/rtl/style_lint/verible.flags)"
         return self.tool_problem(engine, "verible_lint")
+
+    def _provided(self, engine) -> dict[str, str]:
+        """{unit: owner} of the modules this step does not lint (a child project's: its path; the csr step's: "csr")."""
+        from q3tui.flows.rtl.lib import children, csr
+
+        rtl = self.rtl_dir(engine)
+        out = {u: "csr" for u in csr.read_provided(rtl)}
+        out.update({u: e.get("owner") or e.get("child") or "?" for u, e in children.read_registry(rtl).items()})
+        return out
 
     def max_rounds(self, cfg) -> int:
         return int(self.options.get("max_rounds") or cfg.pipeline.max_fix_iterations)
@@ -81,7 +92,8 @@ class Step(RtlFlowStep):
         waived = set(meta.get("waived") or [])
         todo = [f for f in found if _waiver_key(f.module, f.rule, f.text) not in waived]
         report = {"rtl_files": [p.name for p in files], "flags": flags, "findings": len(found), "waived_findings": len(found) - len(todo),
-                  "syntax_errors": syntax, "rounds": meta["rounds"], "status": "clean"}
+                  "syntax_errors": syntax, "rounds": meta["rounds"], "status": "clean",
+                  "provided": self._provided(engine)}
         if not todo and not syntax:
             write_json(self._report(engine), {**report, "verdict": {"summary": "no findings"}})
             self.save_questions(engine, [q for q in self.questions_list(engine) if q.id in load_answers(self._q_paths(engine)[1])])

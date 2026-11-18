@@ -44,6 +44,8 @@ class Step(RtlFlowStep):
         return [*([r] if r.is_file() else []), *super().reset_files(engine)]
 
     def missing_input(self, engine) -> str | None:
+        if (bad := self.child_registry_problem(engine)):
+            return bad
         if not self.rtl_files(engine):
             return f"the RTL is needed first ({engine.project.rel(self.rtl_dir(engine))}/: step rtl)"
         return self.tool_problem(engine, "verible_format")
