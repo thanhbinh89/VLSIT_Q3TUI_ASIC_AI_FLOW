@@ -89,6 +89,7 @@ add-on files.
 | `follow_up(engine)` | right after a human approval: `{title, detail, action, switch}` — the TUI asks, yes runs the flow's action and moves to flow `switch` (fpga: hand the PPA fixes to rtl) |
 | `unattended(engine)` (async) | an unattended run (`auto_answer`) passed this step's gate: do what a person would do next; True runs the flow again from its start (bounded by the step's own limits) |
 | `on_reset` / `on_rebase` / `reset_files` / `refresh_reports` | after a reset, when the flow's files moved, what a reset deletes, reports re-derived from outputs |
+| `refuse_change(engine, text) -> str \| None` | a change request for it (`q3tui change`, the assistant, a hand-off from another flow): a reason refuses it — `Engine.request_change` queues nothing and answers `refused: <reason>` (rtl: a module of a child project, read-only here) |
 | `pending_reviews` / `open_questions` / `default_to_apply` | the step's reviewable items and questions |
 
 ## Add-ons

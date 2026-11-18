@@ -383,7 +383,7 @@ e.g. Opus where precision matters, Haiku for mechanical/high-volume work.
 | `rtl.parallel` | int | Modules written at once. |
 | `rtl.max_fix_attempts` | int | Extra rounds when lint or synthesis still fail. |
 | `rtl.max_turns` | int | Agent turns for one module (write, compile, fix). |
-| `rtl.child_projects` | one path per line | Q3TUI projects whose RTL this one uses as it is (read-only), see [§10](#10-the-rtl-flow). |
+| `pipeline.step_options.rtl.child_projects` | one path per line | Q3TUI projects whose RTL this one uses as it is (read-only), see [§10](#10-the-rtl-flow). |
 
 The coding rules are the rtl flow's own rule files, see [§5](#5-rtl-coding-rules).
 
@@ -483,7 +483,8 @@ pipeline:
 
 Each child needs its own `q3tui.yaml` and a `filelist.f` in its RTL folder (run its rtl flow first). `q3tui --flow rtl run` in the parent copies the files the children's
 filelists list into `src/rtl/` byte for byte, writes only the parent's own modules (`m_par_top` instantiates the children's tops) and puts the children first in `filelist.f`.
-The child modules are not rule-checked, style-linted or edited.
+The child modules are not rule-checked, style-linted or edited. A parent and a child that both have an asynchronous CSR both have the generator's synchronizer model
+(`m_csr_sync`): made by the same APB-CSR-Generator version it is the same file, and the parent keeps its own; otherwise the rtl (or csr) step stops and says so.
 
 What you see: a warning per child that has not passed its own rtl flow (or changed since); `src/rtl/child/provided.json` (code writes it: unit, owner, source file, sha256);
 a hand edit of a copy is restored with a warning; lint findings in a child file are warnings that name the child. Editing a file in a child makes the parent's rtl step stale, and the

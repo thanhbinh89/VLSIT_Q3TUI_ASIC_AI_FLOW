@@ -72,7 +72,9 @@ checkpoint. A step left `running` by a killed process is re-run.
 ## Who sees what
 
 Independence is enforced with `Stage.deny_dirs` / `write_dirs` / `write_files` (hook-level,
-not just by prompt), and settled decisions follow the flow's `sees:`. In the spec and rtl flows:
+not just by prompt), and settled decisions follow the flow's `sees:`. `Stage.read_only_files` are files no stage may write
+(reading them stays allowed): the child projects' copies and their registry, filled in `StepContext.llm` for every stage of
+every step and for the TUI assistant (rtl-flow.md "Child projects"). In the spec and rtl flows:
 
 | Agent | Sees | Never sees |
 |---|---|---|

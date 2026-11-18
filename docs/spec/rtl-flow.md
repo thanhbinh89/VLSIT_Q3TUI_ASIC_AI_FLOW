@@ -99,16 +99,20 @@ so it does for a child that is this project or lists it (a cycle). The `parse` s
 
 **The copy** (start of the `rtl` step, code): only the files the child's `filelist.f` lists, byte for byte, flat into this project's RTL folder. The parent's filelist lists files only: a line
 starting with `+` or `-`, a missing file or a suffix other than `.sv` / `.v` stops the step. Each file must hold exactly the one unit (module / package / interface) it is named after. The same unit
-with identical bytes in two children is copied once; different bytes, or a unit named like a CSR module or a file of this project that is not a copy, stops the step naming both sources. A child that is itself a parent
+with identical bytes in two children is copied once; different bytes stop the step naming both sources. A unit this project's csr step makes too (the APB-CSR-Generator's synchronizer model has the tool's
+name, so a parent and a child with an asynchronous CSR both have it) stays this project's file when the child's has the very same bytes: neither copied nor recorded (log "`m_csr_sync`: the same file as this
+project's own (csr step): kept as this project's"); other bytes stop the step naming both files ("both projects must use the same APB-CSR-Generator version, or rename one of them"), and the csr step never
+overwrites a recorded copy with other content (it stops naming the child project). A file here named like a child unit that is not a recorded copy (and differs) stops it too: "`<file>` is not a recorded
+copy of <child>: if it is an earlier copy, delete it (it is copied again); else rename one of them"; one with the child's very bytes is taken as the copy. A child that is itself a parent
 contributes every file of its filelist; the owner of what it got from its own children comes from its registry (a middle project's copy that differs from the owner's file is a warning: run that project's rtl flow first).
 
 **Registry** `<rtl>/child/provided.json` (code writes it), keyed by unit, in copy order: `kind: "child"`, `owner` (the project that owns the file), `child` (the listed project it came through),
 `source`, `sha256`, `file`, `unit`, `instances`, `top: true` on each child's top. Paths are relative to this project (`../cha`, `../cha/src/rtl/m_cha_top.sv`). A damaged registry makes the rtl,
-format, style_lint and smoke steps wait ("…/child/provided.json is damaged (…): delete it, then run again").
+format, style_lint and smoke steps wait ("…/child/provided.json is damaged (…): delete it, then run again (copies that differ from their child are then reported: delete them too, they are copied again)").
 
 **Read-only everywhere.** A hand edit of a copy is restored from the source with a warning naming the owner; units no longer provided (or the option removed) lose their copies and the registry (backed up).
 Every LLM stage of every step, and the TUI assistant, gets the copies and the registry as read-only files (the file-access hook denies Edit / Write). `format`, `style_lint` skip them
-(`style_report.json`: `provided: {unit: owner | "csr"}`), and `rtl_files` leaves them out.
+(`style_report.json`: `provided: {unit: owner | "csr"}`, only with child projects), and `rtl_files` leaves them out.
 
 **The `rtl` step.** Child units are in the plan as provided modules: never written, rule-checked, REQ-tagged or style-linted; in the filelist first (registry order), then the own modules in compile order;
 in the design lint and the synthesis. The writer of an instantiating module gets the child's file path marked read-only; an own module follows the child's header (ports, parameters), so a change inside a child
@@ -119,7 +123,8 @@ then run this project again"), by `q3tui change`, the assistant and every hand-o
 `child_modules: {unit: {file, owner, child, source, sha256, lint_findings}}`.
 
 **Synthesis (deliberate).** A synthesis error attributed to a child unit is never sent to a fix session: the step fails naming the unit and the owner ("U is read-only here: … fix it in O, then run this project again"),
-and the failure is not cached, so a re-run fails the same way until the child is fixed. FR-01 R4 asks for a warning; a design that does not synthesize never passes here.
+and the failure is not cached, so a re-run fails the same way until the child is fixed. FR-01 R4 asks for a warning; a design that does not synthesize never passes here. An error line naming an own module and
+a child's (Yosys: ``Module `m_cha_top' referenced in module `m_par_top' …``) is the own module's: the own modules are matched first, so it goes to a fix round.
 
 **Staleness.** The `rtl` step's inputs are each child's `q3tui.yaml`, filelist and listed files, the registry and the copies. A child change makes it stale; its run copies again, then every step that reads
 the RTL is stale in turn (content hashes). `parse` also reads the children's filelists (a code-only re-fit, no LLM, when only children changed). Known limitation: the keys of child files are absolute paths, so moving
@@ -132,9 +137,10 @@ or when its history cannot be read. The child's history is only read, never writ
 (warning); child modules in the module map get `provided_by: <owner>`; a child `top_module` is replaced by this project's own root (warning).
 
 **Other steps and flows.** Smoke and dv simulation triage: an `rtl_bug` in a child module becomes a blocking question (decision `child:<owner>`; options: fix it in O, or the use of the module here is wrong), never
-a change for `rtl`. Sanity: the waiver review sees the child units and the child's reviewed waivers; a `fix_rtl` on a child unit becomes `ask` naming the owner, and `sanity_handoff` never sends one; `q3tui loop` keeps and
-restores the best RTL without the copies and `child/`. FPGA / ASIC: `ppa_optimize` drops a fix on a child unit, `ppa_handoff` / `asic_handoff` refuse it ("ID not handed off (U belongs to the child project O: fix it there)"),
-`fpga_port` drops the porter's orders on child units, `asic_port` findings carry the `owner`, and the panels show "refused → O". The dv, sanity, fpga and asic flows build from the RTL folder / `filelist.f`, so they use the assembled design as it is.
+a change for `rtl`. A verdict whose module is none of the design's (an instance name) goes to one of this project's own modules, never a child's; a fix the rtl step refuses all the same is that question too,
+never counted as handed over (no fix round spent, nothing in the history of what was tried). Sanity: the waiver review sees the child units and the child's reviewed waivers; a `fix_rtl` on a child unit becomes `ask` naming the owner, and `sanity_handoff` never sends one; `q3tui loop` keeps and
+restores the best RTL without the copies and the top-level `child/` folder. FPGA / ASIC: `ppa_optimize` drops a fix on a child unit, `ppa_handoff` / `asic_handoff` refuse it ("ID not handed off (U belongs to the child project O: fix it there)"),
+`fpga_port` drops the porter's orders on child units (`fpga_port.json` `refused`, only when there are some), `asic_port` findings carry the `owner`, and the panels show "refused → O". The dv, sanity, fpga and asic flows build from the RTL folder / `filelist.f`, so they use the assembled design as it is.
 The history records the registry (each copy's sha256) like any project file.
 
 ## Rules
