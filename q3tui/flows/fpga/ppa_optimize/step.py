@@ -12,7 +12,8 @@ from pathlib import Path
 
 from q3tui.flows import skill_sections
 from q3tui.flows.fpga.lib.base import PPA_JSON, FpgaStep
-from q3tui.flows.fpga.lib.plan import PLAN_JSON, PpaPlan
+from q3tui.flows.fpga.lib.plan import PLAN_JSON, PpaPlan, owner_of, split_fixes
+from q3tui.flows.rtl.lib import children
 from q3tui.llm.runtime import Stage
 from q3tui.pipeline.base import StepContext, StepFailed
 
@@ -65,7 +66,8 @@ class Step(FpgaStep):
             return []
         return [f"{q['question']} → {q['answer']}" for q in rep.question_list(engine) if q.get("answer")]
 
-    def _prompt(self, engine, ppa: dict, missed: list[str], history: list[dict], modules: list[str]) -> str:
+    def _prompt(self, engine, ppa: dict, missed: list[str], history: list[dict], modules: list[str],
+                registry: dict[str, dict] | None = None) -> str:
         goal = str(self.options.get("goal") or "")
         decided = self._decisions(engine)
         lines = ["## Targets missed" if missed else "## Goal (nothing missed: improve the result)",
@@ -81,6 +83,8 @@ class Step(FpgaStep):
                  "Worst path: " + ", ".join(f"{k} {v}" for k, v in (ppa.get("critical_path") or {}).items()),
                  "Unconstrained: " + (str(ppa.get("unconstrained") or "none")),
                  "\n## RTL modules (read src/rtl/<module>.sv)", ", ".join(modules),
+                 *(["The modules of child projects are read-only here: propose no fix for them (the fix is made in the child project): "
+                    + ", ".join(f"{u} ({owner_of(e)})" for u, e in sorted((registry or {}).items()))] if registry else []),
                  "\nThe reports are in build/syn/fpga/reports/ (paths.rpt has the worst paths in full: read it)."]
         if history:
             lines += ["\n## Already tried in earlier rounds (do not repeat)"]
@@ -120,16 +124,16 @@ class Step(FpgaStep):
             raise StepFailed(f"PPA: {len(rounds)} optimization round(s) done at {clocks or 'these constraints'}, targets still missed "
                              f"({'; '.join(missed)}). Raise options.max_iterations to go on, or change the clock target / the spec.")
         modules = sorted(f.stem for f in self.rtl_files(engine))
-        stage = Stage(name="ppa_optimize", system_prompt=SYSTEM, prompt=self._prompt(engine, ppa, missed, history, modules),
+        try:
+            registry = children.read_registry(self.rtl_dir(engine))
+        except children.ChildError as exc:
+            raise StepFailed(str(exc)) from exc
+        stage = Stage(name="ppa_optimize", system_prompt=SYSTEM, prompt=self._prompt(engine, ppa, missed, history, modules, registry),
                       cwd=project.root, builtin_tools=["Read", "Grep", "Glob"], output_model=PpaPlan,
                       deny_dirs=[project.src_dir / "tb", project.src_dir / "sva", project.tb_dir, project.model_dir])
         out: PpaPlan = (await ctx.llm(stage)).output
-        fixes, dropped = [], []
-        for i, f in enumerate(out.fixes[:5], 1):
-            if f.target == "rtl" and f.module not in modules:
-                dropped.append(f"fix {i}: unknown module '{f.module}'")
-                continue
-            fixes.append({"id": f"F{len(history) * 5 + i}", **f.model_dump(), "handed_off": None})
+        kept, dropped = split_fixes(out.fixes[:5], modules, registry)
+        fixes = [{"id": f"F{len(history) * 5 + i}", **f.model_dump(), "handed_off": None} for i, f in kept]
         self.write(engine, PLAN_JSON, {**base, "status": "proposed" if fixes else "no_fix", "analysis": out.analysis, "fixes": fixes,
                                        "no_fix_reason": out.no_fix_reason, "dropped": dropped})
         ctx.emit("log", message=f"PPA round {base['iteration']}: {len(fixes)} fix(es) proposed"

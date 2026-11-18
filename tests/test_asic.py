@@ -785,3 +785,28 @@ def test_a_projects_catalog_adds_its_libraries(proj):
     ids = [p.id for p in pdks.catalog(proj)]
     assert "proj65" in ids  # (the built-in open-source ones stay when they exist here: no "only")
     assert "proj65" not in [p.id for p in pdks.catalog()] and "proj65" not in pdks.BUILTIN.read_text()  # (and the repo never lists it)
+
+
+async def test_asic_findings_in_a_child_module_are_not_handed_off(proj):
+    (proj.root / "flows").mkdir(exist_ok=True)
+    (proj.root / "flows" / "owner.yaml").write_text("name: owner\nsteps:\n  - {id: spec, kind: spec}\n  - {id: rtl, kind: reads, deps: [spec]}\n")
+    (proj.root / "src" / "rtl" / "mem_wrap.sv").write_text(DIRTY)
+    (proj.root / "src" / "rtl" / "filelist.f").write_text("src/rtl/blk.sv\nsrc/rtl/mem_wrap.sv\n")
+    (proj.root / "src" / "rtl" / "child").mkdir()
+    (proj.root / "src" / "rtl" / "child" / "provided.json").write_text(json.dumps(
+        {"mem_wrap": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "mem_wrap.sv", "unit": "module", "instances": []}}))
+    _yaml(proj.root, extra="    asic_port:\n      handoff_flow: owner\n")
+    eng = Engine(Project.open(proj.root))
+    await eng.run(yes=True, only="asic_port")
+    found = json.loads((proj.schemas_dir / "asic_port.json").read_text())["findings"]
+    assert found and all(f["owner"] == "../cha" for f in found)  # (the scan marks them)
+    ops = Ops(eng)
+    msg = ops.run_action("asic_handoff", ids="P1")
+    assert "P1 not handed off (mem_wrap belongs to the child project ../cha: fix it there)" in msg and "q3tui --flow" not in msg
+    assert "rtl" not in Engine(proj, flow=flows.load_flow("owner", proj.root)).state.feedback
+    p = json.loads((proj.schemas_dir / "asic_port.json").read_text())
+    assert p["findings"][0]["refused"]["owner"] == "../cha" and not p["findings"][0]["handed_off"]
+    ops.run_action("asic_handoff")  # the rest: all of them are the child's
+    with pytest.raises(EngineError, match="no finding"):
+        ops.run_action("asic_handoff")
+    assert {v.name: v for v in Engine(Project.open(proj.root)).status()}["asic_port"].edited == []

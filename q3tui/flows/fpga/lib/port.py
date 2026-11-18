@@ -357,3 +357,17 @@ def hand_to_flow(ctx, flow_name: str, text: str) -> str:
     other.request_change("rtl", text)
     ctx.engine.reload()
     return owner.name
+
+
+def split_orders(orders: list, modules: set[str], registry: dict[str, dict]) -> tuple[list, list[dict]]:
+    """([orders to hand to the RTL flow], [{module, owner, change}] refused): R3, an order on a child project's module is not handed off,
+    the change is made in that project. Orders on unknown modules or without a change are dropped as before."""
+    from q3tui.flows.fpga.lib.plan import owner_of
+
+    kept, refused = [], []
+    for o in orders:
+        if o.module in registry and o.change.strip():
+            refused.append({"module": o.module, "owner": owner_of(registry[o.module]), "change": o.change})
+        elif o.module in modules and o.change.strip():
+            kept.append(o)
+    return kept, refused

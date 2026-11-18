@@ -15,8 +15,10 @@ from pathlib import Path
 from q3tui.flows import skill_sections
 from q3tui.flows.asic.lib import port, porter
 from q3tui.flows.asic.lib.base import PORT_JSON, AsicStep
+from q3tui.flows.fpga.lib.plan import owner_of
+from q3tui.flows.rtl.lib import children
 from q3tui.llm.runtime import Stage
-from q3tui.pipeline.base import StepContext
+from q3tui.pipeline.base import StepContext, StepFailed
 
 SYSTEM = skill_sections(Path(__file__).parent / "md" / "skill.md")["SYSTEM"]
 
@@ -101,6 +103,13 @@ class Step(AsicStep):
         sent = {(f["rule"], f["module"], f["text"]): f["handed_off"] for f in prev.get("findings", []) if f.get("handed_off")}
         for f in found:  # (a finding handed off earlier and still there: the RTL was not changed for it yet, or not enough)
             f["handed_off"] = sent.get((f["rule"], f["module"], f["text"]))
+        try:
+            registry = children.read_registry(self.rtl_dir(engine))
+        except children.ChildError as exc:
+            raise StepFailed(str(exc)) from exc
+        for f in found:  # (R3: a finding inside a child project's module stays with that project: asic_handoff does not send it)
+            if f["module"] in registry:
+                f["owner"] = owner_of(registry[f["module"]])
         errors = sum(f["severity"] == "error" for f in found)
         verdict = "fail" if errors else ("warn" if found else "pass")
         self.write(engine, PORT_JSON, {"status": verdict, "files": len(files), "waived": list(waive), "errors": errors,

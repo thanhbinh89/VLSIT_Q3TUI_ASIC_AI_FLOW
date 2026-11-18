@@ -13,6 +13,7 @@ def _handoff(ops, ids: str) -> str:
     from q3tui import flows
     from q3tui.flows.asic.lib import port
     from q3tui.flows.asic.lib.base import PORT_JSON
+    from q3tui.flows.rtl.lib import children
     from q3tui.pipeline.engine import Engine, EngineError
 
     step = next((s for s in ops.engine.steps if s.kind == "asic.asic_port"), None)
@@ -20,27 +21,38 @@ def _handoff(ops, ids: str) -> str:
         raise EngineError("this flow has no asic_port step")
     data = step.read(ops.engine, PORT_JSON, {}) or {}
     wanted = {i.strip() for i in ids.split(",") if i.strip()}
-    todo = [f for f in data.get("findings", []) if not f.get("handed_off") and (not wanted or f["id"] in wanted)]
+    todo = [f for f in data.get("findings", []) if not f.get("handed_off") and not f.get("refused") and (not wanted or f["id"] in wanted)]
     if not todo:
         raise EngineError("no finding to hand off (run asic_port first, or they were handed off already)")
     owner = flows.load_flow(str(step.options.get("handoff_flow") or "rtl"), ops.project.root)
     if owner.name == ops.engine.flow.name:
         raise EngineError("handoff_flow is this flow itself")
+    try:
+        registry = children.read_registry(step.rtl_dir(ops.engine))
+    except children.ChildError as exc:
+        raise EngineError(str(exc)) from exc
     ops.engine.save()
     other = Engine(ops.project, flow=owner)
     if "rtl" not in other.by_name:
         raise EngineError(f"flow '{owner.name}' has no step 'rtl' to hand the findings to")
+    sent, refused = [], []
     for f in todo:
+        if why := fpga_addon.refuse_child(f, f.get("module") or "", registry):  # (R3: a child's module is fixed in its own project)
+            refused.append(why)
+            continue
         other.request_change("rtl", port.handoff_text(f))
         f["handed_off"] = {"flow": owner.name, "step": "rtl", "at": datetime.now().isoformat(timespec="seconds")}
+        sent.append(f["id"])
     step.write(ops.engine, PORT_JSON, data)
     ops.engine.reload()
     rec = ops.engine.state.steps.get(step.name)
     if rec is not None:  # (the hand-off is recorded in the findings: not a user edit of the step's output)
         rec.outputs = ops.engine._hash_files(step.outputs(ops.engine))
         ops.engine.save()
-    return ops._log(step.name, f"ASIC port: handed off {', '.join(f['id'] for f in todo)} → {owner.name}:rtl; run flow '{owner.name}' to apply them "
-                               f"(q3tui --flow {owner.name} run)")
+    if not sent:  # (everything asked for is a child's: nothing to run elsewhere)
+        return ops._log(step.name, f"ASIC port: {'; '.join(refused)}")
+    return ops._log(step.name, f"ASIC port: handed off {', '.join(sent)} → {owner.name}:rtl; run flow '{owner.name}' to apply them "
+                               f"(q3tui --flow {owner.name} run)" + (f"; {'; '.join(refused)}" if refused else ""))
 
 
 def register_estimate(api) -> None:

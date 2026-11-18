@@ -1250,3 +1250,69 @@ async def test_a_check_that_changes_the_rtl_after_the_targets_are_met_runs_synth
     assert any("changed the RTL: synthesis runs again" in m for m in events)
     assert sum("running owner:format → smoke" in m for m in events) == 1  # (the RTL it left counts as checked)
     assert all(v.status in ("done", "user") for v in Engine(proj).status())  # synthesis is of the RTL as it is now
+
+
+# -- child projects (FR-01 R3): a hand-off never targets a child's module --------------------------------------------------------
+
+
+def _child_registry(rtl_dir: Path, *units: str, owner: str = "../cha") -> None:
+    (rtl_dir / "child").mkdir(exist_ok=True)
+    (rtl_dir / "child" / "provided.json").write_text(json.dumps(
+        {u: {"kind": "child", "owner": owner, "child": owner, "file": f"{u}.sv", "unit": "module", "instances": []} for u in units}))
+
+
+def test_the_ppa_split_drops_a_fix_on_a_child_module_and_says_whose():
+    from q3tui.flows.fpga.lib.plan import Fix, split_fixes
+
+    fixes = [Fix(target="rtl", module="blk", change="a", why="w"), Fix(target="rtl", module="ghost", change="b", why="w"),
+             Fix(target="spec", change="c", why="w"), Fix(target="rtl", module="ok", change="d", why="w")]
+    kept, dropped = split_fixes(fixes, ["blk", "ok"], {"blk": {"owner": "../cha"}})
+    assert [i for i, _ in kept] == [3, 4]
+    assert dropped == ["fix 1: `blk` is a module of the child project ../cha (read-only here)", "fix 2: unknown module 'ghost'"]
+    kept, dropped = split_fixes(fixes, ["blk", "ok"], {})  # no registry: as before
+    assert [i for i, _ in kept] == [1, 3, 4] and dropped == ["fix 2: unknown module 'ghost'"]
+
+
+def test_the_fpga_port_orders_on_a_child_module_are_refused():
+    from q3tui.flows.fpga.lib.port import PortOrder, split_orders
+
+    orders = [PortOrder(module="blk", change="x", why="y"), PortOrder(module="ok", change="z", why="y"), PortOrder(module="ghost", change="z", why="y")]
+    kept, refused = split_orders(orders, {"blk", "ok"}, {"blk": {"owner": "../cha"}})
+    assert [o.module for o in kept] == ["ok"] and refused == [{"module": "blk", "owner": "../cha", "change": "x"}]
+    kept, refused = split_orders(orders, {"blk", "ok"}, {})
+    assert [o.module for o in kept] == ["blk", "ok"] and refused == []
+
+
+def test_a_ppa_fix_on_a_child_module_is_not_handed_off(proj):
+    (proj.root / "flows").mkdir(exist_ok=True)
+    (proj.root / "flows" / "owner.yaml").write_text("name: owner\nsteps:\n  - {id: spec, kind: spec}\n  - {id: rtl, kind: reads, deps: [spec]}\n")
+    _fork(proj, ppa_optimize=("handoff_flow: rtl", "handoff_flow: owner"))
+    _child_registry(proj.root / "src" / "rtl", "blk")
+    fixes = [{"id": "F1", "target": "rtl", "module": "blk", "change": "register it", "why": "path", "handed_off": None},
+             {"id": "F3", "target": "spec", "module": "", "change": "relax the clock", "why": "WNS", "handed_off": None}]
+    (proj.schemas_dir / "ppa_plan.json").write_text(json.dumps({"part": "xc7k325tffg900-2", "status": "proposed", "fixes": fixes}))
+    ops = Ops(Engine(proj))
+    msg = ops.run_action("ppa_handoff")
+    assert "F3 → owner:spec" in msg and "F1 not handed off (blk belongs to the child project ../cha: fix it there)" in msg
+    other = Engine(proj, flow=flows.load_flow("owner", proj.root))
+    assert "rtl" not in other.state.feedback and len(other.state.feedback["spec"]) == 1
+    plan = json.loads((proj.schemas_dir / "ppa_plan.json").read_text())
+    f1 = plan["fixes"][0]
+    assert f1["handed_off"] is None and f1["refused"]["owner"] == "../cha" and plan["fixes"][1]["handed_off"]["step"] == "spec"
+    with pytest.raises(EngineError, match="no proposed fix"):  # the refused one is not offered again
+        ops.run_action("ppa_handoff")
+    # asked for alone: nothing is sent, and it says why (the first call recorded it, so reset it to see the message)
+    plan["fixes"][0].pop("refused")
+    (proj.schemas_dir / "ppa_plan.json").write_text(json.dumps(plan))
+    msg = Ops(Engine(proj)).run_action("ppa_handoff", ids="F1")
+    assert "F1 not handed off" in msg and "handed off F1" not in msg and "q3tui --flow" not in msg
+    assert "rtl" not in Engine(proj, flow=flows.load_flow("owner", proj.root)).state.feedback
+
+
+def test_a_damaged_child_registry_stops_the_ppa_hand_off(proj):
+    (proj.root / "src" / "rtl" / "child").mkdir()
+    (proj.root / "src" / "rtl" / "child" / "provided.json").write_text("{not json")
+    (proj.schemas_dir / "ppa_plan.json").write_text(json.dumps(
+        {"part": "p", "fixes": [{"id": "F1", "target": "spec", "change": "c", "why": "w", "handed_off": None}]}))
+    with pytest.raises(EngineError, match="damaged"):
+        Ops(Engine(proj)).run_action("ppa_handoff")

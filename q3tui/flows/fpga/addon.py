@@ -26,12 +26,27 @@ def _edit(ops, fn) -> str:
     return ops._log(step.name, f"SDC: {msg} (constraints/sdc/*.tcl updated; run to re-synthesize)" + (f" · {'; '.join(f'{c.name}: {n}' for c in cfg.clocks if (n := hints.asic_note(ops.project, c.name)))}" if notes else ""))
 
 
+def refuse_child(item: dict, unit: str, registry: dict[str, dict]) -> str | None:
+    """R3: an item aimed at a child project's module is not handed off (the fix is made in that project). Records it as `refused` (so it is
+    not offered again) and returns what to report; None when `unit` is not a child's."""
+    from datetime import datetime
+
+    from q3tui.flows.fpga.lib.plan import owner_of
+
+    if unit not in registry:
+        return None
+    owner = owner_of(registry[unit])
+    item["refused"] = {"owner": owner, "at": datetime.now().isoformat(timespec="seconds")}
+    return f"{item['id']} not handed off ({unit} belongs to the child project {owner}: fix it there)"
+
+
 def _handoff(ops, ids: str) -> str:
     """Send the proposed PPA fixes to the flow that owns the RTL and the spec, as change requests of its steps."""
     from datetime import datetime
 
     from q3tui import flows
     from q3tui.flows.fpga.lib.plan import PLAN_JSON, handoff_text
+    from q3tui.flows.rtl.lib import children
     from q3tui.pipeline.engine import Engine, EngineError
 
     step = next((s for s in ops.engine.steps if s.kind == "fpga.ppa_optimize"), None)
@@ -39,16 +54,23 @@ def _handoff(ops, ids: str) -> str:
         raise EngineError("this flow has no ppa_optimize step")
     plan = step.read(ops.engine, PLAN_JSON, {})
     wanted = {i.strip() for i in ids.split(",") if i.strip()}
-    todo = [f for f in plan.get("fixes", []) if not f.get("handed_off") and (not wanted or f["id"] in wanted)]
+    todo = [f for f in plan.get("fixes", []) if not f.get("handed_off") and not f.get("refused") and (not wanted or f["id"] in wanted)]
     if not todo:
         raise EngineError("no proposed fix to hand off (run ppa_optimize first, or they were handed off already)")
     owner = flows.load_flow(str(step.options.get("handoff_flow") or "rtl"), ops.project.root)
     if owner.name == ops.engine.flow.name:
         raise EngineError("handoff_flow is this flow itself")
+    try:
+        registry = children.read_registry(step.rtl_dir(ops.engine))
+    except children.ChildError as exc:
+        raise EngineError(str(exc)) from exc
     ops.engine.save()  # what this process holds is on disk; the other flow's engine reads and writes the same pipeline.json
     other = Engine(ops.project, flow=owner)
-    sent = []
+    sent, refused = [], []
     for f in todo:
+        if f.get("target") == "rtl" and (why := refuse_child(f, f.get("module") or "", registry)):
+            refused.append(why)
+            continue
         target, text = handoff_text(f, plan.get("part") or "", str(step.options.get("goal") or ""))
         if target not in other.by_name:
             raise EngineError(f"flow '{owner.name}' has no step '{target}' to hand {f['id']} to")
@@ -61,7 +83,10 @@ def _handoff(ops, ids: str) -> str:
     if rec is not None:  # (the plan records the hand-off: not a user edit of the step's output)
         rec.outputs = ops.engine._hash_files(step.outputs(ops.engine))
         ops.engine.save()
-    return ops._log(step.name, f"PPA: handed off {', '.join(sent)}; run flow '{owner.name}' to apply them (q3tui --flow {owner.name} run)")
+    if not sent:  # (everything asked for is a child's: nothing to run elsewhere)
+        return ops._log(step.name, f"PPA: {'; '.join(refused)}")
+    return ops._log(step.name, f"PPA: handed off {', '.join(sent)}; run flow '{owner.name}' to apply them (q3tui --flow {owner.name} run)"
+                    + (f"; {'; '.join(refused)}" if refused else ""))
 
 
 def register(api) -> None:
