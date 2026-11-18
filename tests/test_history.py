@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 import anyio
 import pytest
@@ -19,6 +20,7 @@ from q3tui.core.cli import main
 from q3tui.core.config import Config
 from q3tui.core.ops import Ops
 from q3tui.core.project import Project
+from q3tui.flows.rtl.lib import children
 from q3tui.pipeline.base import StepFailed
 from q3tui.pipeline.engine import Engine
 from tests.test_dv_plain import llm, make_engine, run_all, run_step, tools_dir  # noqa: F401 - fixtures
@@ -94,6 +96,40 @@ def test_what_changed_since_a_version_is_read_without_writing_the_history(tmp_pa
     (tmp_path / "b.sv").write_text("module b; wire w; endmodule\n")
     assert history.changed_since(project, rev, ["a.sv", "b.sv", "c.sv"]) == ["b.sv"]
     assert index.read_bytes() == before
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads an index of mode 000")
+def test_an_index_that_cannot_be_read_is_a_history_error_and_a_childs_warning(tmp_path):
+    """The scratch copy fails as git does, with a HistoryError: an index the reader may not open (mode 000) gives the integration project
+    R11's warning about its child ("its history cannot be read"), never a failed run."""
+    cha = tmp_path / "cha"
+    (cha / "src" / "rtl").mkdir(parents=True)
+    (cha / "q3tui.yaml").write_text("{}\n")
+    (cha / "src/rtl/m_cha_top.sv").write_text("module m_cha_top; endmodule\n")
+    (cha / "src/rtl/filelist.f").write_text("src/rtl/m_cha_top.sv\n")
+    project = Project(cha, Config())
+    rev = history.record(project, "a version", mark="rtl")
+    index = history.folder(project) / "index"
+    index.chmod(0)
+    try:
+        with pytest.raises(history.HistoryError, match="Permission denied"):
+            history.changed_since(project, rev, ["src/rtl/m_cha_top.sv"])
+        (child,) = children.resolve(tmp_path / "par", ["../cha"])
+        (warning,) = children.status_warnings(child, children.listed(child))
+        assert warning.startswith("child project ../cha: its history cannot be read (") and "Permission denied" in warning
+    finally:
+        index.chmod(0o644)
+
+
+def test_a_scratch_folder_that_cannot_be_made_is_a_history_error(tmp_path, monkeypatch):
+    """No folder for the scratch index (the temporary folder missing, full or not writable) is a HistoryError too, not a raw OSError: only a
+    missing index file is no error (git then reads none, as it would from the history)."""
+    project = Project(tmp_path, Config())
+    (tmp_path / "a.sv").write_text("module a; endmodule\n")
+    rev = history.record(project, "a version", mark="rtl")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "gone"))
+    with pytest.raises(history.HistoryError, match="git diff could not run"):
+        history.changed_since(project, rev, ["a.sv"])
 
 
 def test_no_history_when_it_is_off(tmp_path):

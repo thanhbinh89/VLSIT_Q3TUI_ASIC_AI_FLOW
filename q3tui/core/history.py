@@ -210,15 +210,20 @@ def changed_since(project, rev: str, paths: list[str]) -> list[str]:
     every file).
 
     It reads the history and never writes it: an integration project asks it of each child project on every run. `git diff` refreshes the
-    index it compares with and writes it back (`--no-optional-locks` keeps only `git status` from that), so it compares with a scratch copy:
-    the same answer, and the project's own index is neither rewritten nor locked while that project records a version."""
+    index it compares with and writes it back (`--no-optional-locks` keeps only `git status` from that), so it compares with a scratch copy
+    that keeps the index's times (git's racy-clean check sees what it would see on the index itself): the same answer, and the project's own
+    index is neither rewritten nor locked while that project records a version. A copy that cannot be made (an index it may not read, no
+    room for the scratch folder) is a HistoryError, as git's own failures are: the caller reports the history as unreadable."""
     if not paths:
         return []
-    with tempfile.TemporaryDirectory(prefix="q3tui-history-") as tmp:
-        scratch = Path(tmp) / "index"
-        with suppress(FileNotFoundError):  # (no index yet: git reads none, as it would from the history)
-            shutil.copyfile(folder(project) / "index", scratch)
-        out = _git(project, "diff", "--name-only", rev, "--", *paths, index=scratch)
+    try:
+        with tempfile.TemporaryDirectory(prefix="q3tui-history-", ignore_cleanup_errors=True) as tmp:  # (one left behind fails no read)
+            scratch = Path(tmp) / "index"
+            with suppress(FileNotFoundError):  # (no index yet: git reads none, as it would from the history)
+                shutil.copy2(folder(project) / "index", scratch)
+            out = _git(project, "diff", "--name-only", rev, "--", *paths, index=scratch)
+    except OSError as exc:  # (the scratch folder or the copy; git's own failures are HistoryErrors already)
+        raise HistoryError(f"git diff could not run: {exc}") from exc
     return [f for f in out.splitlines() if f.strip()]
 
 
