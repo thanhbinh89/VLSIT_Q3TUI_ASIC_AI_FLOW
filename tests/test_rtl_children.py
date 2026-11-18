@@ -239,8 +239,10 @@ def test_a_child_module_named_like_this_projects_own_module_stops(tmp_path):
     rtl.mkdir(parents=True)
     mine = "module m_cha_top (input logic i_clk);\nendmodule\n"
     (rtl / "m_cha_top.sv").write_text(mine)  # (this project's own file, not a copy)
-    with pytest.raises(children.ChildError, match=r"\(\.\./cha/src/rtl/m_cha_top\.sv\) has the name of this project's own module \(src/rtl/m_cha_top\.sv\)"):
+    with pytest.raises(children.ChildError) as e:
         children.copy(project, rtl, kids, set())
+    assert str(e.value) == ("`src/rtl/m_cha_top.sv` is not a recorded copy of ../cha: if it is an earlier copy, delete it (it is copied again); "
+                            "else rename one of them")
     assert (rtl / "m_cha_top.sv").read_text() == mine and not children.registry_file(rtl).exists()
     (rtl / "m_cha_top.sv").write_text(CHA)  # (the child's very bytes: adopted)
     res = children.copy(project, rtl, kids, set())
@@ -352,7 +354,8 @@ def test_a_damaged_registry_stops_the_copy_and_stays_protected(tmp_path):
     reg = children.registry_file(rtl)
     for damaged in ("{not json", '{"m_cha_top": "not a record"}'):
         reg.write_text(damaged)
-        with pytest.raises(children.ChildError, match=r"src/rtl/child/provided\.json is damaged \(.+\): delete it, then run again$"):
+        with pytest.raises(children.ChildError, match=r"src/rtl/child/provided\.json is damaged \(.+\): delete it, then run again \(copies that differ "
+                                                      r"from their child are then reported: delete them too, they are copied again\)$"):
             children.copy(eng.project, rtl, kids, set())
         (only,) = children.protected(eng).items()
         assert only[0] == reg and "damaged" in only[1]
@@ -729,6 +732,31 @@ def test_the_rtl_step_waits_for_its_children_and_a_readable_registry(tmp_path, t
     assert (rtl / "m_cha_top.sv").read_text() == CHA and len(calls(llm, "rtl_m_par_top")) == 1
 
 
+def test_the_way_out_of_a_damaged_registry_says_what_to_delete(tmp_path, tools_dir, llm):
+    """Ruling 15 (M1): the recovery a damaged registry asks for, when a child moved on meanwhile. Deleted, the registry no longer names the copy
+    that differs from its child: the run says it is not a recorded copy and what to do (an earlier copy: delete it, it is copied again), never
+    just "rename one of them"; deleted, the copy is the child's file again."""
+    cha, _ = _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    v2 = CHA.replace("endmodule", "  // v2\nendmodule")
+    (cha / "src/rtl/m_cha_top.sv").write_text(v2)  # (the child moved on)
+    rtl, reg = eng.project.rtl_dir, children.registry_file(eng.project.rtl_dir)
+    reg.write_text("{not json")  # (a merge conflict)
+    assert eng.by_name["rtl"].missing_input(eng).endswith(
+        ": delete it, then run again (copies that differ from their child are then reported: delete them too, they are copied again)")
+    reg.unlink()  # (what it says to do)
+    with pytest.raises(StepFailed) as exc:
+        run_step(eng, "rtl")
+    assert str(exc.value) == ("`src/rtl/m_cha_top.sv` is not a recorded copy of ../cha: if it is an earlier copy, delete it (it is copied again); "
+                              "else rename one of them")
+    (rtl / "m_cha_top.sv").unlink()  # (an earlier copy: deleted, as it says)
+    run_step(eng, "rtl")
+    assert (rtl / "m_cha_top.sv").read_text() == v2 and list(children.read_registry(rtl)) == ["m_cha_top", "m_chb_top"]
+    assert eng.state.steps["rtl"].status == "done"
+
+
 def test_a_middle_project_and_its_own_child_both_listed(tmp_path, tools_dir, llm):
     """Ruling 6 (R9): a middle project and its own child both listed: the top instantiates the middle project's top only. The child's top is
     instantiated inside the middle one already; a second instance in the top is one nobody asked for."""
@@ -868,6 +896,38 @@ def test_a_synthesis_error_in_a_child_fails_again_when_nothing_changed(tmp_path,
     first, again = failures
     assert "m_cha_top is read-only here: a module of the child project ../cha: fix it in ../cha, then run this project again" in again
     assert again == first and eng.state.steps["rtl"].status == "failed" and len(calls(llm, "rtl_m_par_top")) == 1
+
+
+PORT_ERR_SYNTH = '''
+import re, sys
+script = open(sys.argv[1]).read()
+top = re.search(r"-top (\\w+)", script).group(1)
+print("Yosys 0.58 (git sha1 abc)")
+for f in re.findall(r"^read_verilog -sv (\\S+)", script, re.M):
+    if "SYNTH_ERR" in open(f).read():  # (a port the instantiated module does not have: Yosys names both modules, no file)
+        print("ERROR: Module `m_cha_top' referenced in module `m_par_top' in cell `u_m_cha_top' does not have a port named 'i_enable'.")
+        sys.exit(1)
+print("   Number of cells:                 42")
+print(f"   Chip area for module '\\\\{top}': 1234.5")
+'''
+
+
+def test_a_synthesis_error_naming_an_own_module_and_a_child_is_the_own_modules(tmp_path, tools_dir, llm):
+    """Ruling 15 (M2): a synthesis error line that names this project's module and a child's ("Module `m_cha_top' referenced in module
+    `m_par_top' …") is the own module's to fix, whatever the plan's order (the spec lists the child first, as parse may leave it): a fix round,
+    never "read-only here"."""
+    _cha_chb(tmp_path)
+    (tools_dir / "synth.py").write_text(PORT_ERR_SYNTH)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    spec = artifacts.read(eng.project, "structured_spec.json")
+    spec["modules"].insert(0, {"name": "m_cha_top", "description": "the counter", "req_ids": [], "instances": [], "provided_by": "../cha"})
+    artifacts.write(eng.project, "structured_spec.json", spec, check=False)
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    llm.vlsit_bad = {"m_par_top": ["synth"]}  # (its first write connects the port the child does not have)
+    run_step(eng, "rtl")
+    _, fix = calls(llm, "rtl_m_par_top")
+    assert "referenced in module `m_par_top' in cell `u_m_cha_top' does not have a port named 'i_enable'" in fix.prompt
+    assert eng.state.steps["rtl"].status == "done" and json.loads((eng.project.root / "schemas/synth_report.json").read_text())["synthesis"] == "pass"
 
 
 def test_a_change_request_for_a_child_is_refused(tmp_path, tools_dir, llm):

@@ -210,10 +210,12 @@ def registry_file(rtl_dir: Path) -> Path:
 def read_registry(rtl_dir: Path) -> dict[str, dict]:
     """{unit: its record} of the copies here; {} when there is none (no child project). A registry that cannot be read (a merge conflict, a
     hand edit) raises ChildError rather than count as none: without it the copies would be writable by every stage and never removed once
-    no child provides them."""
+    no child provides them. Deleted, the next copy takes a copy that still has its child's bytes as the copy again; one whose child moved on
+    meanwhile is no longer known as a copy, so the message says that one is coming and what to do with it."""
     records, damage = _registry(rtl_dir)
     if damage:
-        raise ChildError(f"{registry_file(rtl_dir)} is damaged ({damage}): delete it, then run again")
+        raise ChildError(f"{registry_file(rtl_dir)} is damaged ({damage}): delete it, then run again (copies that differ from their child are "
+                         "then reported: delete them too, they are copied again)")
     return records
 
 
@@ -356,7 +358,9 @@ def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, d
     """R8 against this project's own modules. A unit it makes itself (the csr step's) that its file here has with the child's very bytes is no
     clash, and stays this project's (True): the APB-CSR-Generator's synchronizer model has the tool's name, so a parent and a child with an
     asynchronous CSR both have it. With other bytes it stops the copy naming both files (one design holds one `unit`). So does a file of the
-    unit's name here that is not a copy; one with the child's very bytes is no clash either: it becomes the copy (False)."""
+    unit's name here that is not a recorded copy: this project's own module, or an earlier copy the registry no longer names (it was deleted,
+    damaged, and the child moved on since), which only you can tell apart. One with the child's very bytes is no clash: it becomes the copy
+    (False)."""
     if unit in own:
         mine = rtl_dir / f"{unit}.sv"
         if mine.is_file() and sha256_file(mine) == entry["sha256"]:
@@ -371,8 +375,8 @@ def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, d
     clash = [f for f in dict.fromkeys((rtl_dir / entry["file"], rtl_dir / f"{unit}.sv"))
              if f.is_file() and f.name != copy_here and not (f.name == entry["file"] and sha256_file(f) == entry["sha256"])]
     if clash:
-        raise ChildError(f"`{unit}` of the child project {entry['owner']} ({entry['source']}) has the name of this project's own module "
-                         f"({project.rel(clash[0])}): rename one of them")
+        raise ChildError(f"`{project.rel(clash[0])}` is not a recorded copy of {entry['owner']}: if it is an earlier copy, delete it (it is copied "
+                         "again); else rename one of them")
     return False
 
 

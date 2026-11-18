@@ -624,8 +624,9 @@ class RtlGenStep(VlsitStep):
                                        "log": project.rel(Path(res.log_path)) if res.log_path else None}
                 if st["tool"]:
                     report["tool"] = st["tool"]
-                if not ok:
-                    errors[c["name"]] = synth.attribute_errors(log, list(by_name)) or {"": [f"synthesis failed (rc={res.returncode})"]}
+                if not ok:  # (this project's own modules first: a line naming an own module and a read-only one, as "Module `x' referenced in
+                    # module `y'", is the own module's to fix — the read-only one passed its own project's synthesis)
+                    errors[c["name"]] = synth.attribute_errors(log, sorted(by_name, key=lambda n: n in read_only)) or {"": [f"synthesis failed (rc={res.returncode})"]}
             for cname, by_mod in errors.items():  # errors that name no module of ours: the tool's setup (library, script), not the RTL
                 if set(by_mod) == {""}:
                     from q3tui.eda.tools import ToolBroken
