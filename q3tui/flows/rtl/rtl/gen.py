@@ -94,12 +94,13 @@ class _Run:
     results: dict[str, VModuleResult] = field(default_factory=dict)
     lint_state: dict[str, dict] = field(default_factory=dict)  # module -> {status, warnings}
     wrote: set[str] = field(default_factory=set)
+    files: dict[str, Path] = field(default_factory=dict)  # unit -> its file where it is not <rtl>/<unit>.sv (RtlGenStep._unit_files)
 
     def by_name(self) -> dict[str, PlanModule]:
         return {m.name: m for m in self.plan.modules}
 
     def file(self, module: str) -> Path:
-        return self.lay.rtl / f"{module}.sv"
+        return self.files.get(module) or self.lay.rtl / f"{module}.sv"
 
 
 class RtlGenStep(VlsitStep):
@@ -197,6 +198,29 @@ class RtlGenStep(VlsitStep):
         plan: RtlPlan = res.output
         write_json(artifacts.path(ctx.project, "rtl_plan.json"), {"inputs": key, "plan": plan.model_dump()})
         return plan
+
+    # -- units this step does not write (hooks: the rtl step's child projects) --------------------------------------------
+
+    def _unit_files(self, engine) -> dict[str, Path]:
+        """unit -> its file, for a unit whose file is not `<rtl>/<unit>.sv` (a copy keeps the name its own project gave it, `.v` too)."""
+        return {}
+
+    def _read_only_units(self, run: _Run) -> dict[str, str]:
+        """unit -> why it is read-only here. Such a unit is part of the design (plan, filelist, lint, synthesis) but not this project's: it is
+        never written, checked or fixed by this step, and the report's `modules` leave it out (`_report_extra` reports it)."""
+        return {}
+
+    def _order(self, run: _Run) -> list[str]:
+        """The order of the design's files: the filelist and the synthesis read them in it (packages, leaves, the top last)."""
+        return compile_order(run.plan)
+
+    def _child_ref(self, run: _Run, name: str) -> str:
+        """How a module's prompt points at a module it instantiates: the file to read its ports from."""
+        return run.ctx.project.rel(run.file(name))
+
+    def _report_extra(self, run: _Run) -> dict:
+        """More keys of synth_report.json."""
+        return {}
 
     # -- checks (code) --------------------------------------------------------------------------------
 
@@ -320,7 +344,7 @@ class RtlGenStep(VlsitStep):
             prompt = rtl_prompts.module_prompt(
                 module=pm.name, path=project.rel(path), description=pm.description,
                 reqs=[(r, run.reqs.get(r, "")) for r in pm.req_ids], params=run.params,
-                children=[(c, project.rel(run.file(c))) for c in pm.instances if c in run.by_name()],
+                children=[(c, self._child_ref(run, c)) for c in pm.instances if c in run.by_name()],
                 packages=[project.rel(run.file(m.name)) for m in run.plan.modules if m.is_package and m.name != pm.name],
                 spec_files=run.spec_files, answers=snap["answers"], settled=settled, feedback=feedback, problems=problems,
                 existing=path.is_file() and bool(path.read_text().strip()), top=pm.name == run.plan.top)
@@ -430,7 +454,7 @@ class RtlGenStep(VlsitStep):
         lay.rtl.mkdir(parents=True, exist_ok=True)
         run = _Run(ctx, plan, prof, rules, sha256_json([rules, prof.__dict__]), tools, reqs, params, spec_files, lay,
                    load_answers(answers_path), self._owner(engine), settled_block(engine.settled_questions(self.name)), general,
-                   by_unit, meta)
+                   by_unit, meta, files=self._unit_files(engine))
         run.imported, ports = self._imported(engine)
         run.keep_ports = ports if plan.top in run.imported else set()
         names = {m.name for m in plan.modules}
@@ -459,9 +483,9 @@ class RtlGenStep(VlsitStep):
                     tg.start_soon(one, pm)
 
         # the whole design: filelist, lint at the top, cross-module problems go back to the module they are in
-        order = compile_order(plan)
+        order = self._order(run)
         fl = lay.rtl / "filelist.f"
-        fl.write_text("\n".join(project.rel(lay.rtl / f"{n}.sv") for n in order if (lay.rtl / f"{n}.sv").is_file()) + "\n")
+        fl.write_text("\n".join(project.rel(run.file(n)) for n in order if run.file(n).is_file()) + "\n")
         by_name = run.by_name()
         for _ in range(max(1, ctx.cfg.pipeline.max_fix_iterations)):
             per = await anyio.to_thread.run_sync(lambda: self._full_lint(run))
@@ -544,7 +568,7 @@ class RtlGenStep(VlsitStep):
             ctx.emit("warning", message=f"synthesis not run: {why} (recorded as \"not run\", not as passed)")
             report["note"] = f"synthesis not run: {why}"
             return report
-        files = [(lay.rtl / f"{n}.sv").resolve() for n in order if (lay.rtl / f"{n}.sv").is_file()]
+        files = [run.file(n).resolve() for n in order if run.file(n).is_file()]
         backend = synth.backend_for(run.tools.roles["synth"].parse, self.options)
         if backend == "dc" and not any(c["liberty"] for c in synth.corners(self.options)):
             why = ("Design Compiler needs a target library: set options.synth.corners: [{name, library: <.db>}] on the rtl step "
@@ -609,7 +633,7 @@ class RtlGenStep(VlsitStep):
                         async with limiter:
                             await self._fix(run, by_name[m], probs)
                     tg.start_soon(fix)
-            files = [(lay.rtl / f"{n}.sv").resolve() for n in order if (lay.rtl / f"{n}.sv").is_file()]
+            files = [run.file(n).resolve() for n in order if run.file(n).is_file()]
         if report["synthesis"] == "fail":
             leftover.setdefault(top, []).append("synthesis fails: " + "; ".join(
                 f"{k}: {v['status']}" for k, v in report["corners"].items()) + " (see the synth logs under .q3tui/sim/rtl)")
@@ -617,12 +641,13 @@ class RtlGenStep(VlsitStep):
         return report
 
     def _write_report(self, run: _Run, order: list[str], report: dict) -> None:
-        lay, project = run.lay, run.ctx.project
+        project = run.ctx.project
         mods: dict[str, dict] = {}
         total_tags, distinct = 0, set()
+        read_only = self._read_only_units(run)
         for n in order:
-            f = lay.rtl / f"{n}.sv"
-            if not f.is_file():
+            f = run.file(n)
+            if n in read_only or not f.is_file():  # (a read-only unit is not this project's: no rule count, its REQ tags are another spec's)
                 continue
             text = f.read_text()
             tags = rules_check.req_tags(text)
@@ -643,6 +668,7 @@ class RtlGenStep(VlsitStep):
                      "max_warnings": int(self.options.get("lint_max_warnings", 0))},
             "modules": mods, "req_ids_tagged": total_tags, "req_ids_distinct": len(distinct),
             "rule_profile": run.prof.name, "generated_at": artifacts.now()})
+        report.update(self._report_extra(run))
         artifacts.write(project, "synth_report.json", report, check=False)
 
     def _write_questions(self, ctx, run: _Run, q_json: Path, answers_path: Path, q_md: Path) -> None:

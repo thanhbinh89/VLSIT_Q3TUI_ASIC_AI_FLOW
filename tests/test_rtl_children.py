@@ -14,8 +14,11 @@ from q3tui.core.config import Config, load_config
 from q3tui.core.ops import Ops
 from q3tui.core.project import Project, sha256_file
 from q3tui.flows.rtl.lib import children
+from q3tui.flows.spec.lib import artifacts
+from q3tui.pipeline.base import StepFailed
 from q3tui.pipeline.engine import Engine
 from tests.fakes import use_test_flow
+from tests.test_rtl_gen import calls, config_json, llm, run_step, tools_dir, tools_yaml  # noqa: F401 (fixtures)
 
 # the child modules of FR-01 §8 (projects ../cha and ../chb)
 CHA = """module m_cha_top #(
@@ -462,3 +465,223 @@ def test_a_step_can_refuse_a_change_request(tmp_path):
     assert not eng.state.feedback.get("s")
     assert any(e.kind == "warning" and "change request refused: it is a child file" in e.data["message"] for e in seen)
     assert eng.request_change("s", "other").startswith("queued")
+
+
+# -- the rtl step with child projects (FR-01 §8: ../cha, ../chb and the parent par) -------------------------------------
+
+def make_parent(root: Path, tools_dir: Path, children: list[str]) -> Engine:
+    """The integration project `<root>/par` of FR-01 §8, an rtl-flow project whose rtl step lists `children` as child projects: its spec has the
+    top `m_par_top` (REQ-001), which instantiates the child tops `m_cha_top` and `m_chb_top`; the final config; the fake tools. The children
+    are not made here: make_child makes them (`make_child(root, "cha", {"m_cha_top.sv": CHA})`, `make_child(root, "chb", {"m_chb_top.sv": CHB})`),
+    and the test tells the fake LLM the module it writes (`llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": [...]}}`)."""
+    par = root / "par"
+    (par / "spec").mkdir(parents=True)
+    (par / "q3tui.yaml").write_text(f"pipeline: {{flow: rtl, step_options: {{rtl: {{rules: [rtl_rule.md], child_projects: {json.dumps(children)}}}}}}}\n"
+                                    + tools_yaml(tools_dir))
+    (par / "spec" / "spec.md").write_text("# par: integration of cha and chb\n")
+    project = Project.open(par)
+    spec = {"metadata": {"ip_name": "par", "spec_revision": "0.1", "phase": 1, "gate_status": "approved", "top_module": "m_par_top"},
+            "requirements": [{"req_id": "REQ-001", "text": "u_cha.o_cnt drives u_chb.i_d, u_chb.o_q is o_q", "category": "functional",
+                              "ambiguity_score": 0.1}],
+            "parameters": [],
+            "modules": [{"name": "m_par_top", "description": "the top: the child projects' tops, connected", "req_ids": ["REQ-001"],
+                         "instances": ["m_cha_top", "m_chb_top"]}]}
+    artifacts.write(project, "structured_spec.json", spec, check=False)
+    artifacts.write(project, "final_config.json", config_json(), check=False)
+    return Engine(project)
+
+
+def _cha_chb(root: Path) -> tuple[Path, Path]:
+    """The child projects of FR-01 §8, beside the parent: ../cha (m_cha_top) and ../chb (m_chb_top)."""
+    return make_child(root, "cha", {"m_cha_top.sv": CHA}), make_child(root, "chb", {"m_chb_top.sv": CHB})
+
+
+def _events(eng: Engine) -> list:
+    seen: list = []
+    eng.bus.subscribe(seen.append)
+    return seen
+
+
+def _said(seen: list, kind: str) -> list[str]:
+    return [e.data.get("message", "") for e in seen if e.kind == kind]
+
+
+def test_the_parent_writes_only_its_own_module(tmp_path, tools_dir, llm):
+    """T3: the rtl step writes only the parent's own module; the child files stay as their projects made them (no REQ tags, no rule check),
+    first in the filelist, reported apart from the own modules with their owner."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    par, rtl = tmp_path / "par", tmp_path / "par" / "src" / "rtl"
+    assert [c.name for c in llm.calls if c.name.startswith("rtl_")] == ["rtl_m_par_top"]
+    assert (rtl / "m_cha_top.sv").read_text() == CHA and (rtl / "m_chb_top.sv").read_text() == CHB
+    assert (rtl / "filelist.f").read_text().split() == ["src/rtl/m_cha_top.sv", "src/rtl/m_chb_top.sv", "src/rtl/m_par_top.sv"]
+    rep = json.loads((par / "schemas/synth_report.json").read_text())
+    assert list(rep["modules"]) == ["m_par_top"] and set(rep["child_modules"]) == {"m_cha_top", "m_chb_top"} and rep["child_modules"]["m_cha_top"]["owner"] == "../cha"
+    assert rep["child_modules"]["m_cha_top"] == {"file": "src/rtl/m_cha_top.sv", "owner": "../cha", "child": "../cha", "source": "../cha/src/rtl/m_cha_top.sv",
+                                                "sha256": sha256_file(rtl / "m_cha_top.sv"), "lint_findings": 0}
+    assert rep["synthesis"] == "pass" and rep["lint"]["status"] == "pass" and rep["req_ids_distinct"] == 1
+    assert "REQ-001" in (rtl / "m_par_top.sv").read_text()
+    assert not [f for f in eng.by_name["rtl"].outputs(eng) if f.stem in ("m_cha_top", "m_chb_top")]
+    assert eng.state.steps["rtl"].status == "done" and set(eng.state.step_meta["rtl"]["modules"]) == {"m_par_top"}
+
+
+def test_the_writer_of_the_top_is_told_the_child_files(tmp_path, tools_dir, llm):
+    """R5: the stage that writes the module instantiating the child tops reads their files (their ports and parameters), told they are
+    read-only: the only file it may write is its own."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    (stage,) = calls(llm, "rtl_m_par_top")
+    assert "`m_cha_top` → src/rtl/m_cha_top.sv (dự án con ../cha: chỉ đọc, không sửa)" in stage.prompt
+    assert "`m_chb_top` → src/rtl/m_chb_top.sv (dự án con ../chb: chỉ đọc, không sửa)" in stage.prompt
+    assert stage.write_files == [eng.project.rtl_dir / "m_par_top.sv"] and eng.project.rtl_dir / "m_cha_top.sv" in stage.read_only_files
+
+
+def test_a_requirement_the_plan_gives_a_child_goes_to_its_parent(tmp_path, tools_dir, llm):
+    """A requirement the spec maps to a child module (parsed before the children were listed) is implemented and tagged in the own module
+    that instantiates it: REQ tags go only into this project's files."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    spec = artifacts.read(eng.project, "structured_spec.json")
+    spec["requirements"].append({"req_id": "REQ-002", "text": "the counter counts the enabled cycles", "category": "functional",
+                                 "ambiguity_score": 0.1, "rtl_modules": ["m_cha_top"]})
+    artifacts.write(eng.project, "structured_spec.json", spec, check=False)
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001", "REQ-002"], "children": ["m_cha_top", "m_chb_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    rtl = eng.project.rtl_dir
+    (stage,) = calls(llm, "rtl_m_par_top")
+    assert "- REQ-002: the counter counts the enabled cycles" in stage.prompt and "REQ-002" in (rtl / "m_par_top.sv").read_text()
+    assert "REQ-002 is on m_cha_top, a module of the child project ../cha: moved to m_par_top" in _said(seen, "warning")
+    assert (rtl / "m_cha_top.sv").read_text() == CHA and [c.name for c in llm.calls if c.name.startswith("rtl_")] == ["rtl_m_par_top"]
+    assert (rtl / "filelist.f").read_text().split() == ["src/rtl/m_cha_top.sv", "src/rtl/m_chb_top.sv", "src/rtl/m_par_top.sv"]
+
+
+def test_a_child_change_makes_rtl_stale_and_is_copied_again(tmp_path, tools_dir, llm):
+    """T6 (R7): a child's file is an input: changed, the rtl step is stale and the next run copies it again. The module that instantiates it
+    depends on its interface: a change inside its body writes nothing, a renamed port updates the parent's module."""
+    cha, _ = _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    rtl, step = eng.project.rtl_dir, eng.by_name["rtl"]
+    assert eng.evaluate(step).status == "done"
+    v2 = CHA.replace("endmodule", "  // v2\nendmodule")
+    (cha / "src/rtl/m_cha_top.sv").write_text(v2)
+    assert eng.evaluate(step).status == "stale"
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert (rtl / "m_cha_top.sv").read_text() == v2 and len(calls(llm, "rtl_m_par_top")) == 1
+    assert "child projects: copied m_cha_top" in _said(seen, "log") and eng.evaluate(step).status == "done"
+    assert children.read_registry(rtl)["m_cha_top"]["sha256"] == sha256_file(cha / "src/rtl/m_cha_top.sv")
+    renamed = v2.replace("i_en", "i_enable")
+    (cha / "src/rtl/m_cha_top.sv").write_text(renamed)
+    assert eng.evaluate(step).status == "stale"
+    run_step(eng, "rtl")
+    first, second = calls(llm, "rtl_m_par_top")
+    assert (rtl / "m_cha_top.sv").read_text() == renamed and "`m_cha_top` changed" in second.prompt and "`m_chb_top`" not in second.prompt
+
+
+def test_a_hand_edit_of_a_copy_is_restored(tmp_path, tools_dir, llm):
+    """T6 (R7): a copy edited here makes the rtl step stale; the run restores the child's file, with a warning naming the project to fix it
+    in, and the design is as it was (nothing to write)."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    rtl, step = eng.project.rtl_dir, eng.by_name["rtl"]
+    (rtl / "m_cha_top.sv").write_text(CHA.replace("o_cnt + 1'b1", "o_cnt + 2'd2"))
+    assert eng.evaluate(step).status == "stale"
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert (rtl / "m_cha_top.sv").read_text() == CHA
+    (w,) = [m for m in _said(seen, "warning") if "restored" in m]
+    assert "m_cha_top" in w and "../cha" in w
+    assert any("2'd2" in f.read_text() for f in (eng.project.root / ".q3tui" / "bkp").rglob("m_cha_top.sv"))  # (the edit is backed up)
+    assert len(calls(llm, "rtl_m_par_top")) == 1 and eng.evaluate(step).status == "done"
+
+
+def test_removing_the_option_removes_the_copies(tmp_path, tools_dir, llm):
+    """Review Focus 3: the option removed after a run: the copies and the registry go (backed up), and the step no longer counts those modules
+    as provided (inputs, outputs, read-only files)."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    par = eng.project.root
+    cfg = par / "q3tui.yaml"
+    cfg.write_text(cfg.read_text().replace(', child_projects: ["../cha", "../chb"]', ""))
+    assert "child_projects" not in cfg.read_text()
+    eng = Engine(Project.open(par))
+    rtl, step = eng.project.rtl_dir, eng.by_name["rtl"]
+    assert eng.evaluate(step).status == "stale"
+    llm.vlsit_modules["m_par_top"]["children"] = []  # (the top has nothing to instantiate any more)
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert not (rtl / "m_cha_top.sv").exists() and not (rtl / "m_chb_top.sv").exists() and not (rtl / "child").exists()
+    assert sorted(f.read_text() for f in (par / ".q3tui" / "bkp").rglob("m_ch?_top.sv")) == [CHA, CHB]
+    assert any("m_cha_top" in m and "removed" in m for m in _said(seen, "log"))
+    assert (rtl / "filelist.f").read_text().split() == ["src/rtl/m_par_top.sv"]
+    assert step._provided(eng) == {} and children.protected(eng) == {}
+    assert not [f for f in step.inputs(eng) if f.name in ("m_cha_top.sv", "m_chb_top.sv", "provided.json", "filelist.f")]
+    assert "child_modules" not in json.loads((par / "schemas/synth_report.json").read_text()) and eng.evaluate(step).status == "done"
+
+
+def test_the_top_instantiates_an_unplaced_child_top_and_is_never_a_child(tmp_path, tools_dir, llm):
+    """A child's top that no module of the spec instantiates is the top's (logged); a spec whose top is a child module stops the step: this
+    project's top is its own module."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    spec = artifacts.read(eng.project, "structured_spec.json")
+    spec["modules"][0]["instances"] = ["m_cha_top"]
+    artifacts.write(eng.project, "structured_spec.json", spec, check=False)
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert "the spec names no module that instantiates m_chb_top: the top m_par_top does" in _said(seen, "log")
+    assert "`m_chb_top` → src/rtl/m_chb_top.sv" in calls(llm, "rtl_m_par_top")[0].prompt
+    spec["metadata"]["top_module"] = "m_cha_top"
+    spec["modules"].append({"name": "m_cha_top", "description": "the counter", "req_ids": [], "instances": []})
+    artifacts.write(eng.project, "structured_spec.json", spec, check=False)
+    with pytest.raises(StepFailed, match=r"the top module m_cha_top is a module of the child project \.\./cha"):
+        run_step(eng, "rtl")
+
+
+def test_a_verilog_file_of_a_child_keeps_its_name(tmp_path, tools_dir, llm):
+    """A child's `.v` file is copied under its own name: the filelist, the synthesis, the prompt and the report name that file."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA})
+    make_child(tmp_path, "chb", {"m_chb_top.v": CHB})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    run_step(eng, "rtl")
+    rtl = eng.project.rtl_dir
+    assert (rtl / "m_chb_top.v").read_text() == CHB and not (rtl / "m_chb_top.sv").exists() and rtl / "m_chb_top.v" in eng.by_name["rtl"].inputs(eng)
+    assert (rtl / "filelist.f").read_text().split() == ["src/rtl/m_cha_top.sv", "src/rtl/m_chb_top.v", "src/rtl/m_par_top.sv"]
+    assert "`m_chb_top` → src/rtl/m_chb_top.v" in calls(llm, "rtl_m_par_top")[0].prompt
+    assert str((rtl / "m_chb_top.v").resolve()) in (rtl / "synth_default.ys").read_text()
+    assert json.loads((eng.project.root / "schemas/synth_report.json").read_text())["child_modules"]["m_chb_top"]["file"] == "src/rtl/m_chb_top.v"
+
+
+def test_the_rtl_step_waits_for_its_children_and_a_readable_registry(tmp_path, tools_dir, llm):
+    """A child that cannot be used, or a damaged registry, is a missing input: the step waits, naming it. A refresh (inputs, outputs) never
+    fails on the damage, and a run on it stops with the same message, the copies untouched."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    step, rtl = eng.by_name["rtl"], eng.project.rtl_dir
+    view = eng.evaluate(step)
+    assert view.status == "missing_input" and view.detail.startswith("child project ../chb: no folder")
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    assert eng.evaluate(step).status == "pending"
+    run_step(eng, "rtl")
+    reg = children.registry_file(rtl)
+    reg.write_text("{not json")
+    assert reg in step.inputs(eng) and step._provided(eng) == {} and rtl / "m_par_top.sv" in step.outputs(eng)
+    view = eng.evaluate(step)
+    assert view.status == "missing_input" and "provided.json is damaged" in view.detail
+    with pytest.raises(StepFailed, match="provided.json is damaged"):
+        run_step(eng, "rtl")
+    assert (rtl / "m_cha_top.sv").read_text() == CHA and len(calls(llm, "rtl_m_par_top")) == 1
