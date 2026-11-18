@@ -11,6 +11,7 @@ deep it comes from. All of it is code: what is copied, the clashes and the owner
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from q3tui.core.config import CONFIG_FILENAME, Config
-from q3tui.core.project import Project, read_json, sha256_file, write_json
+from q3tui.core.project import Project, sha256_file, write_json
 
 OPTION = "child_projects"  # the rtl step's option: pipeline.step_options.rtl.child_projects
 REGISTRY = "child/provided.json"  # in the RTL folder: {unit: {kind: "child", owner, child, source, sha256, file, unit, instances, top?}}
@@ -206,13 +207,27 @@ def registry_file(rtl_dir: Path) -> Path:
 
 
 def read_registry(rtl_dir: Path) -> dict[str, dict]:
-    """{unit: its record} of the copies here ({} without child projects; a file that is not a registry counts as none: the next copy writes it
-    again)."""
+    """{unit: its record} of the copies here; {} when there is none (no child project). A registry that cannot be read (a merge conflict, a
+    hand edit) raises ChildError rather than count as none: without it the copies would be writable by every stage and never removed once
+    no child provides them."""
+    records, damage = _registry(rtl_dir)
+    if damage:
+        raise ChildError(f"{registry_file(rtl_dir)} is damaged ({damage}): delete it, then run again")
+    return records
+
+
+def _registry(rtl_dir: Path) -> tuple[dict[str, dict], str]:
+    """(the records, what is wrong with the file: '' when nothing, or when there is no file)."""
+    f = registry_file(rtl_dir)
+    if not f.exists():
+        return {}, ""
     try:
-        data = read_json(registry_file(rtl_dir), {}) or {}
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+        data = json.loads(f.read_text())
+    except (OSError, ValueError) as exc:
+        return {}, " ".join(str(exc).split())[:200]
+    if not isinstance(data, dict) or not all(isinstance(v, dict) for v in data.values()):
+        return {}, "not a JSON object of records"
+    return data, ""
 
 
 def read_all_provided(rtl_dir: Path) -> dict[str, dict]:
@@ -260,11 +275,11 @@ def _add_units(base: Path, child: Child, res: CopyResult, sources: dict[str, Pat
         if names != [unit]:
             raise ChildError(f"{child.label}: {_inside(child, f)} declares {', '.join(f'`{n}`' for n in names) or 'nothing'}: "
                              "a child's file must hold the unit it is named after" + (", and only it" if unit in names else ""))
-        sha = sha256_file(f)
-        owner, source = _owner_of(base, child, f, sha, owners, res.warnings)
+        sha, source = sha256_file(f), _label(base, _real(f))  # (`source`: the file copied, the one `sha256` is of)
+        owner = _owner_of(base, child, f, sha, owners, res.warnings)
         if unit in res.registry:
             if res.registry[unit]["sha256"] != sha:
-                raise ChildError(f"`{unit}` comes from two different files: {_label(base, _real(sources[unit]))} and {_label(base, _real(f))} "
+                raise ChildError(f"`{unit}` comes from two different files: {res.registry[unit]['source']} and {source} "
                                  f"(one design holds one `{unit}`: make them the same, or rename one in its own project)")
             continue
         res.registry[unit] = {"kind": "child", "owner": owner, "child": child.label, "source": source, "sha256": sha, "file": f.name,
@@ -275,34 +290,36 @@ def _add_units(base: Path, child: Child, res: CopyResult, sources: dict[str, Pat
 
 
 def _owners(child: Child) -> dict[str, tuple[Path, Path | None]]:
-    """unit -> (its owner's root, the owner's file) of what the child got from its own children: its own registry, resolved against its root.
-    Never raises."""
+    """unit -> (its owner's root, the file the child copied it from) of what the child got from its own children: its own registry, resolved
+    against its root. Raises ChildError when that registry is damaged: the owners would not be known."""
+    records, damage = _registry(child.rtl_dir)
+    if damage:
+        raise ChildError(f"child project {child.label}: its {REGISTRY} is damaged ({damage}): delete it, run {child.label} again, "
+                         "then this project")
     out = {}
-    for unit, e in read_registry(child.rtl_dir).items():
+    for unit, e in records.items():
         owner, src = e.get("owner"), e.get("source")
         if isinstance(owner, str) and owner.strip():
             out[unit] = (_real(child.root / owner), _real(child.root / src) if isinstance(src, str) and src.strip() else None)
     return out
 
 
-def _owner_of(base: Path, child: Child, f: Path, sha: str, owners: dict, warnings: list[str]) -> tuple[str, str]:
-    """(owner, source) of a file the child lists: the child and the file itself, or, for what it got from its own children, the owner its
-    registry names and the owner's file (what a byte-for-byte check compares with), relabelled for this project. A middle copy that is not its
-    owner's file is still the one used (the middle project lists it), with a warning: the middle project did not run since its owner changed."""
+def _owner_of(base: Path, child: Child, f: Path, sha: str, owners: dict, warnings: list[str]) -> str:
+    """The owner of a file the child lists: the child itself, or, for what it got from its own children, the owner its registry names
+    (relabelled for this project). A middle copy that no longer matches the file the middle project copied it from is still the one used (the
+    middle project lists it), with a warning: the middle project has not run since that file changed."""
     unit = f.stem
     if unit not in owners:
-        return child.label, _label(base, _real(f))
-    owner_root, owner_file = owners[unit]
+        return child.label
+    owner_root, copied_from = owners[unit]
     if owner_root == base:
         raise ChildError(f"child project {child.label} has `{unit}` from this project: a cycle (a project cannot be its own child)")
     owner = _label(base, owner_root)
-    if owner_file is None:
-        return owner, _label(base, _real(f))
-    source = _label(base, owner_file)
-    if not owner_file.is_file() or sha256_file(owner_file) != sha:
-        warnings.append(f"`{unit}` comes through the child project {child.label}, whose copy is not the file of its owner {owner} ({source}): "
-                        f"run {child.label} again")
-    return owner, source
+    if copied_from is not None and (not copied_from.is_file() or sha256_file(copied_from) != sha):
+        src = _label(base, copied_from)
+        why = f"its copy no longer matches {src}" if copied_from.is_file() else f"{src}, which its copy came from, is not there any more"
+        warnings.append(f"`{unit}` (owner {owner}) comes through the child project {child.label}: {why}; run {child.label} again")
+    return owner
 
 
 def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, dict], own: set[str]) -> None:
@@ -399,10 +416,14 @@ def rtl_dir(engine) -> Path:
 
 def protected(engine) -> dict[Path, str]:
     """Every file no LLM stage may write here (R3), with why: the copies (naming the project that owns each) and the registry. {} without
-    child projects."""
+    child projects; a damaged registry: only itself (which files are copies is not known then, and the copy stops on it)."""
     rtl = rtl_dir(engine)
+    records, damage = _registry(rtl)
+    if damage:  # (it runs before every LLM stage: it never fails one; the copy stops on the damage)
+        return {registry_file(rtl): f"Q3TUI's record of the files copied from the child projects, damaged ({damage}): delete it, then run "
+                                    "this project again"}
     out: dict[Path, str] = {}
-    for e in read_registry(rtl).values():
+    for e in records.values():
         f = e.get("file")
         if isinstance(f, str) and f and f == Path(f).name:
             owner = e.get("owner") or e.get("child") or "?"
@@ -420,7 +441,10 @@ def units_by_owner(project_root: Path, entries: list[str]) -> dict[str, str]:
     for child in resolve(base, entries):
         if child.root == base:
             continue
-        owners = _owners(child)
+        try:
+            owners = _owners(child)
+        except ChildError:  # (its damaged registry: the copy stops on it; its own files are still its own)
+            owners = {}
         for line in _lines(child):
             f = _path(child, line)
             if line.startswith(("+", "-")) or f.suffix.lower() not in _HDL:

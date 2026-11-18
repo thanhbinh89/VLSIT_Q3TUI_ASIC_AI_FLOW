@@ -282,7 +282,7 @@ def test_nested_files_keep_their_owner(tmp_path):
     kids = children.resolve(par, ["../npu_core"])
     res = children.copy(project, rtl, kids, set())
     assert list(res.registry) == ["m_pe_top", "m_core_top"] and not res.warnings
-    assert res.registry["m_pe_top"].items() >= {"owner": "../npu_pe", "child": "../npu_core", "source": "../npu_pe/src/rtl/m_pe_top.sv"}.items()
+    assert res.registry["m_pe_top"].items() >= {"owner": "../npu_pe", "child": "../npu_core", "source": "../npu_core/src/rtl/m_pe_top.sv"}.items()
     assert "top" not in res.registry["m_pe_top"]  # (this project instantiates the middle project's top)
     assert res.registry["m_core_top"].items() >= {"owner": "../npu_core", "child": "../npu_core", "instances": ["m_pe_top"], "top": True}.items()
     (pe / "src/rtl/m_pe_top.sv").write_text(PE.replace("~i_a", "i_a"))  # (the owner changed; npu_core did not run again)
@@ -290,6 +290,35 @@ def test_nested_files_keep_their_owner(tmp_path):
     (w,) = res.warnings
     assert "`m_pe_top`" in w and "../npu_core" in w and "../npu_pe" in w
     assert (rtl / "m_pe_top.sv").read_text() == PE  # (what npu_core lists)
+    assert res.registry["m_pe_top"]["source"] == "../npu_core/src/rtl/m_pe_top.sv" and res.registry["m_pe_top"]["sha256"] == sha256_file(rtl / "m_pe_top.sv")
+
+
+def test_a_damaged_registry_stops_the_copy_and_stays_protected(tmp_path):
+    """A registry that cannot be read (a merge conflict, a hand edit) is not taken as none: the copy stops naming it, and every stage is
+    kept off it; deleted, the next copy writes it again. A child's damaged registry stops the copy too (its owners would not be known)."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA})
+    root = tmp_path / "par"
+    root.mkdir()
+    (root / "q3tui.yaml").write_text("pipeline: {flow: rtl, step_options: {rtl: {child_projects: [../cha]}}}\n")
+    eng = Engine(Project.open(root))
+    rtl = children.rtl_dir(eng)
+    kids = children.resolve(eng.project.root, children.configured(eng))
+    children.copy(eng.project, rtl, kids, set())
+    reg = children.registry_file(rtl)
+    for damaged in ("{not json", '{"m_cha_top": "not a record"}'):
+        reg.write_text(damaged)
+        with pytest.raises(children.ChildError, match=r"src/rtl/child/provided\.json is damaged \(.+\): delete it, then run again$"):
+            children.copy(eng.project, rtl, kids, set())
+        (only,) = children.protected(eng).items()
+        assert only[0] == reg and "damaged" in only[1]
+    assert (rtl / "m_cha_top.sv").read_text() == CHA  # (nothing was touched)
+    reg.unlink()
+    assert list(children.copy(eng.project, rtl, kids, set()).registry) == ["m_cha_top"]  # (the copy, identical: taken as the copy again)
+    (tmp_path / "cha" / "src/rtl/child").mkdir()
+    (tmp_path / "cha" / "src/rtl/child/provided.json").write_text("{not json")
+    with pytest.raises(children.ChildError, match=r"^child project \.\./cha: its child/provided\.json is damaged"):
+        children.copy(eng.project, rtl, kids, set())
+    assert children.units_by_owner(eng.project.root, ["../cha"]) == {"m_cha_top": "../cha"}  # (never raises)
 
 
 def test_a_child_that_is_this_project_is_refused(tmp_path):
