@@ -162,7 +162,7 @@ class Step(FpgaStep):
         return changed and plan.get("verified_rtl") != self._rtl_hash(engine)
 
     def _pending(self, engine) -> list[dict]:
-        return [f for f in (self.read(engine, PLAN_JSON, {}) or {}).get("fixes", []) if not f.get("handed_off")]
+        return [f for f in (self.read(engine, PLAN_JSON, {}) or {}).get("fixes", []) if not f.get("handed_off") and not f.get("refused")]
 
     def follow_up(self, engine):
         """Human gate, fixes proposed: offer to hand them off and move to the flow that owns the RTL."""

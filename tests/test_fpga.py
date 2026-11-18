@@ -1316,3 +1316,16 @@ def test_a_damaged_child_registry_stops_the_ppa_hand_off(proj):
         {"part": "p", "fixes": [{"id": "F1", "target": "spec", "change": "c", "why": "w", "handed_off": None}]}))
     with pytest.raises(EngineError, match="damaged"):
         Ops(Engine(proj)).run_action("ppa_handoff")
+
+
+def test_refused_ppa_fixes_are_not_pending_and_show_the_owner(proj):
+    from q3tui.flows.fpga.lib.plan import handoff_label
+
+    fixes = [{"id": "F1", "target": "rtl", "module": "blk", "change": "c", "why": "w", "handed_off": None, "refused": {"owner": "../cha", "at": "t"}},
+             {"id": "F2", "target": "spec", "change": "c", "why": "w", "handed_off": {"flow": "owner", "step": "spec", "at": "t"}}]
+    (proj.schemas_dir / "ppa_plan.json").write_text(json.dumps({"part": "p", "status": "proposed", "fixes": fixes}))
+    eng = Engine(proj)
+    step = eng.by_name["ppa_optimize"]
+    assert step._pending(eng) == [] and step._rtl_fixes(eng) == [] and step.follow_up(eng) is None
+    assert handoff_label(fixes[0]) == ("refused → ../cha", "red")
+    assert handoff_label(fixes[1]) == ("→ owner:spec", "green") and handoff_label({"id": "F3"}) == ("not yet", "yellow")

@@ -54,3 +54,13 @@ def split_fixes(fixes: list, modules: list[str], registry: dict[str, dict]) -> t
         else:
             kept.append((i, f))
     return kept, dropped
+
+
+def handoff_label(item: dict) -> tuple[str, str]:
+    """(text, colour) of the hand-off column for a fix / finding: where it went, `refused → <owner>` (a child's module), or not yet."""
+    sent = item.get("handed_off")
+    if sent:
+        return f"→ {sent['flow']}:{sent['step']}", "green"
+    if item.get("refused"):
+        return f"refused → {item['refused'].get('owner') or '?'}", "red"
+    return "not yet", "yellow"

@@ -29,9 +29,11 @@ def _status(v: str) -> Text:
 def _port_rows(app: "Q3TUIApp") -> list[tuple]:
     rows = []
     for f in (artifact(app, "asic_port.json", {}) or {}).get("findings", []):
-        sent = f.get("handed_off")
+        from q3tui.flows.fpga.lib.plan import handoff_label
+
+        label, style = handoff_label(f)
         rows.append((f["id"], f["id"], Text(f["severity"], style="red" if f["severity"] == "error" else "yellow"), f["rule"],
-                     f"{f['module']}:{f['line']}", f["text"][:70], Text(f"→ {sent['flow']}:{sent['step']}", style="green") if sent else Text("not yet", style="yellow")))
+                     f"{f['module']}:{f['line']}", f["text"][:70], Text(label, style=style)))
     return rows
 
 

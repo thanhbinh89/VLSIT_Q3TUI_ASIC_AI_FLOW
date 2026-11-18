@@ -487,9 +487,10 @@ def _fix_rows(app: "Q3TUIApp") -> list[tuple]:
     p = _plan(app)
     rows = []
     for f in p.get("fixes", []):
-        sent = f.get("handed_off")
-        rows.append((f["id"], f["id"], f["target"], f.get("module") or "–", f["change"][:90],
-                     Text(f"→ {sent['flow']}:{sent['step']}", style="green") if sent else Text("not yet", style="yellow")))
+        from q3tui.flows.fpga.lib.plan import handoff_label
+
+        label, style = handoff_label(f)
+        rows.append((f["id"], f["id"], f["target"], f.get("module") or "–", f["change"][:90], Text(label, style=style)))
     return rows
 
 
