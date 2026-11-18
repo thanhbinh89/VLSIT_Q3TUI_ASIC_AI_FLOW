@@ -535,7 +535,9 @@ class RtlGenStep(VlsitStep):
                                 f"{tags} REQ tag(s)")
 
     def _full_lint(self, run: _Run) -> dict[str, list[str]]:
-        """Lint of the whole design at its top: diagnostics grouped by the module whose file they are in."""
+        """Lint of the whole design at its top: diagnostics grouped by the module whose file they are in. A read-only unit's warnings are not
+        this project's: they never count against its limit (`lint_max_warnings`) nor in its warning count, and are always listed, for the step
+        to report them for the unit's owner (no round here fixes them)."""
         from q3tui.eda.tools import run_role
 
         top, lay = run.plan.top, run.lay
@@ -553,9 +555,11 @@ class RtlGenStep(VlsitStep):
             check_broken(res, "lint")
         limit = int(self.options.get("lint_max_warnings", 0))
         per: dict[str, list[str]] = {}
-        warns = [d for d in res.diagnostics if d.severity == "warning"]
+        read_only = {run.file(u).name for u in self._read_only_units(run)}
+        warns = [d for d in res.diagnostics if d.severity == "warning" and not (d.file and Path(d.file).name in read_only)]
         for d in res.diagnostics:
-            if d.severity == "error" or (d.severity == "warning" and len(warns) > limit):
+            theirs = bool(d.file) and Path(d.file).name in read_only
+            if d.severity == "error" or (d.severity == "warning" and (theirs or len(warns) > limit)):
                 mod = Path(d.file).stem if d.file else top
                 per.setdefault(mod, []).append(f"design lint {d.severity} {d.code}{f' line {d.line}' if d.line else ''}: {d.message}")
         if not res.ok and not per and res.returncode not in (0, None) and not res.diagnostics:  # (warnings within the limit: -Wall's rc only)
@@ -655,7 +659,12 @@ class RtlGenStep(VlsitStep):
             if own or not theirs:  # (the top is blamed for this project's own errors, never for a read-only unit's alone)
                 leftover.setdefault(top, []).append("synthesis fails: " + "; ".join(
                     f"{k}: {v['status']}" for k, v in report["corners"].items()) + " (see the synth logs under .q3tui/sim/rtl)")
-        meta["synth_hash"] = sha256_json({"files": [f.read_text() for f in files], "opt": self.options.get("synth"), "top": top})
+        if report["synthesis"] == "fail" and theirs:
+            # an error in a read-only unit is fixed where the unit is made: no hash says this report is the design's result, so the next run
+            # synthesizes again and fails again naming the unit (never "done" on this report)
+            meta.pop("synth_hash", None)
+        else:
+            meta["synth_hash"] = sha256_json({"files": [f.read_text() for f in files], "opt": self.options.get("synth"), "top": top})
         return report
 
     def _write_report(self, run: _Run, order: list[str], report: dict) -> None:

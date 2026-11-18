@@ -753,6 +753,26 @@ def test_a_lint_error_in_a_child_is_no_problem_of_the_module_using_it(tmp_path, 
     assert not [m for m in _said(seen, "warning") if "m_par_top" in m]
 
 
+def test_a_childs_lint_warnings_do_not_count_against_this_projects_limit(tmp_path, tools_dir, llm):
+    """Ruling 11: the design lint's warnings located in a child's unit do not count against `lint_max_warnings` (this project's limit for its
+    own code): the own module's single warning is within a limit of 1, so no stage fixes it, and the child's warning is still reported."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA.replace("endmodule", "  // LINT_WARN\nendmodule")})
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    eng.by_name["rtl"].options["lint_max_warnings"] = 1
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    llm.vlsit_bad = {"m_par_top": ["lint"]}  # (its first write has one lint warning)
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert eng.state.steps["rtl"].status == "done" and len(calls(llm, "rtl_m_par_top")) == 1
+    assert "LINT_WARN" in (eng.project.rtl_dir / "m_par_top.sv").read_text()  # (within the limit: kept)
+    (w,) = [m for m in _said(seen, "warning") if "lint finding" in m]
+    assert w.startswith("m_cha_top (child project ../cha): 1 lint finding(s), not fixed here — fix it in ../cha")
+    rep = json.loads((eng.project.root / "schemas/synth_report.json").read_text())
+    assert rep["lint"]["status"] == "pass" and rep["lint"]["warnings"] == 1 and rep["lint"]["max_warnings"] == 1
+    assert rep["child_modules"]["m_cha_top"]["lint_findings"] == 1 and rep["modules"]["m_par_top"]["lint_warnings"] == 1
+
+
 def test_a_synthesis_error_in_a_child_fails_the_step_naming_it(tmp_path, tools_dir, llm):
     """R4: a synthesis error located in a child's module is never sent to a fix (no round can fix it here): the step fails at once, naming the
     module and the project to fix it in; this project's top, which synthesizes, is not blamed."""
@@ -768,6 +788,23 @@ def test_a_synthesis_error_in_a_child_fails_the_step_naming_it(tmp_path, tools_d
     assert not calls(llm, "rtl_m_cha_top") and len(calls(llm, "rtl_m_par_top")) == 1
     assert not [m for m in _said(seen, "warning") if m.startswith("synthesis failed")]  # (no fix round was announced)
     assert json.loads((eng.project.root / "schemas/synth_report.json").read_text())["synthesis"] == "fail"
+
+
+def test_a_synthesis_error_in_a_child_fails_again_when_nothing_changed(tmp_path, tools_dir, llm):
+    """Ruling 10: a synthesis that failed on a child's error is not kept as this design's result: a run with nothing changed synthesizes
+    again and fails again naming the child, never "done" on the failed report."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA.replace("endmodule", "  // SYNTH_ERR\nendmodule")})
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    failures = []
+    for _ in range(2):
+        with pytest.raises(StepFailed) as exc:
+            run_step(eng, "rtl")
+        failures.append(str(exc.value))
+    first, again = failures
+    assert "m_cha_top is read-only here: a module of the child project ../cha: fix it in ../cha, then run this project again" in again
+    assert again == first and eng.state.steps["rtl"].status == "failed" and len(calls(llm, "rtl_m_par_top")) == 1
 
 
 def test_a_change_request_for_a_child_is_refused(tmp_path, tools_dir, llm):
