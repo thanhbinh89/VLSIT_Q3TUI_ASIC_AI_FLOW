@@ -25,6 +25,9 @@ A module a generator made (the rtl flow's csr step: `src/rtl/csr/provided.json`)
 place and keeps the change as a patch that outlives the next generation), unless your spec forbids editing it or the rtl option `keep_generated` is on: then it
 is a `spec_issue` with the choices.
 
+A module a child project provides (`src/rtl/child/provided.json`) is read-only here: an `rtl_bug` in one becomes a blocking question naming the child (decision `child:<owner>`, the same
+helper as the smoke triage's), never a change request for the rtl step.
+
 Every verdict is in `schemas/dv_triage.json`. Models of the LLM's answer: `flows/rtl/lib/models.Verdict` (the same as the smoke triage's)."""
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from pydantic import BaseModel
 
 from q3tui.core.project import write_json
 from q3tui.flows import skill_sections
-from q3tui.flows.rtl.lib import skills as skillmod
+from q3tui.flows.rtl.lib import children, skills as skillmod
 from q3tui.flows.rtl.lib.models import Verdict
 from q3tui.llm.runtime import Stage
 from q3tui.pipeline.base import StepContext, StepFailed
@@ -202,6 +205,7 @@ async def handle_failures(step, ctx: StepContext, failures: list[dict], rtl_dir:
              f"## Files (read them): testbench ({kind}) {', '.join(project.rel(p) for p in tb_files[:40])}; RTL {', '.join(project.rel(p) for p in rtl[:40])}"
              + (f"; test programs and data the tests load (the prepare step's: a fault in them is a prepare_bug) {', '.join(project.rel(p) for p in sw_files[:40])}" if sw_files else ""), "",
              *_generated_block(rtl_dir, cfg),
+             *_child_block(rtl_dir),
              *_since_pass_block(since, project.rel(rtl_dir)),
              "## Already handed over in earlier rounds (do not ask for the same again: say if it did not work, and why)",
              "\n".join(f"- {h['key']}" + (" (the wider try)" if h.get("widened") else "") + (f": {h['req'][:200]}" if h.get("req") else "") for h in history[-10:])
@@ -226,6 +230,10 @@ async def handle_failures(step, ctx: StepContext, failures: list[dict], rtl_dir:
         verdicts = await _require_evidence(ctx, stage, result, probe, verdicts)
 
     modules = {p.stem for p in rtl}
+    try:
+        children_here = children.read_registry(rtl_dir)
+    except children.ChildError as exc:
+        raise StepFailed(str(exc)) from exc
     known = {f["id"] for f in failures}
     asks: list[Question] = []
     to_tb = to_prep = 0  # (prepare_bug: the test's programs / data, src/sw — the prepare step builds them again, then simulate runs)
@@ -238,6 +246,8 @@ async def handle_failures(step, ctx: StepContext, failures: list[dict], rtl_dir:
     report = {"round": rounds + 1, "failures": failures, "verdicts": [], **({"debug_runs": probe.runs} if probe is not None else {})}
     wider: dict[str, str] = {}  # rtl unit → what the earlier tries were (the wider try of a fix that keeps coming back)
     for v in verdicts:
+        if v.verdict == "rtl_bug" and v.module in children_here:  # (read-only here: the child's own flows fix it, so it is a question, not a change request)
+            v = children.child_question(v, children_here[v.module])
         report["verdicts"].append(v.model_dump())
         unit = v.module if v.module in modules else next(iter(sorted(modules)), "")
         top = v.verdict == "tb_bug" and kind == "plain" and v.module.strip().lower().removesuffix(".sv") in ("top", "tb_top")  # (the shared tb_top, not the test)
@@ -385,6 +395,20 @@ def _generated_block(rtl_dir: Path, cfg) -> list[str]:
                "(src/rtl/csr/patches/) applied again when the module is generated again: a bug in one is an rtl_bug for it, unless the specification "
                "forbids editing it; then it is a spec_issue whose proposal names the choices (fix the generator, allow the change in place, or revise the spec).")
     return ["## Generated RTL", f"Made by the APB-CSR-Generator (the rtl flow's csr step), not by hand: {', '.join(made)}. {how}", ""]
+
+
+def _child_block(rtl_dir: Path) -> list[str]:
+    """The prompt's part on the RTL that child projects provide: read-only here, so a bug in one is a question naming its project, not an rtl_bug."""
+    try:
+        units = children.read_registry(rtl_dir)
+    except children.ChildError as exc:
+        raise StepFailed(str(exc)) from exc
+    if not units:
+        return []
+    listed = ", ".join(f"`{u}` ({e.get('owner') or e.get('child') or '?'})" for u, e in sorted(units.items()))
+    return ["## RTL of child projects (read-only here)",
+            f"Copied from child projects, never changed by this project: {listed}. A bug inside one of them is not an rtl_bug of this project: answer `unsure` with the decision "
+            "`child:<owner>` and say what is wrong (it is fixed in that project). A fault in how this project's own module uses it (connections, parameters) is an rtl_bug of that own module.", ""]
 
 
 def _hand_to_rtl_flow(ctx: StepContext, flow_name: str, text: str) -> str:

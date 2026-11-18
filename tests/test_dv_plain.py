@@ -907,6 +907,24 @@ def test_the_triage_knows_which_modules_are_generated_and_whether_they_may_be_ch
         assert "## Generated RTL" in stage.prompt and "m_blk_csr" in stage.prompt and said in stage.prompt
 
 
+def test_an_rtl_bug_in_a_child_module_is_not_handed_over(tmp_path, tools_dir, llm):
+    from q3tui import flows
+
+    eng = failing(tmp_path, tools_dir, llm, [{"id": "TC-002", "verdict": "rtl_bug", "module": "m_cha_top", "summary": "the child drops a beat", "request": "keep the beat"}])
+    (tmp_path / "src" / "rtl" / "m_cha_top.sv").write_text("module m_cha_top(input logic clk);\nendmodule\n")
+    (tmp_path / "src" / "rtl" / "child").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "rtl" / "child" / "provided.json").write_text(json.dumps(
+        {"m_cha_top": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "m_cha_top.sv", "unit": "module", "instances": []}}))
+    eng = Engine(Project.open(tmp_path))
+    with pytest.raises(StepFailed, match="need your decision"):
+        run_step(eng, "simulate")
+    (q,) = eng.by_name["simulate"].question_list(eng)
+    assert "../cha" in q["question"] and q["blocking"] and "Fix it in ../cha" in q["options"][0]["label"]
+    assert not Engine(Project.open(tmp_path), flow=flows.load_flow("rtl")).state.feedback.get("rtl")
+    (stage,) = [c for c in llm.calls if c.name == "dv_triage"]
+    assert "## RTL of child projects" in stage.prompt
+
+
 # -- the test programs: prepare writes and builds them, simulate hands it the files a test could not read ------------------------------------------
 
 FLOW_PREP = """name: t
