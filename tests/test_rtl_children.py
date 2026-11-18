@@ -977,3 +977,32 @@ def test_a_new_child_module_reruns_parse_without_the_llm(tmp_path, parse_llm):
     assert len(calls(parse_llm, "parse_spec")) == 1
     data = artifacts.read(eng.project, "structured_spec.json")
     assert {m["name"] for m in data["modules"]} >= {"m_par_top", "m_cha_top"}
+
+
+def test_a_child_added_later_moves_its_requirements_without_the_llm(tmp_path, parse_llm):
+    """The option added after parse ran: the spec's signature is the same, so code alone refits the module map and rewrites the artifact."""
+    import anyio
+
+    eng = _parse_project(tmp_path)
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    par = tmp_path / "par"
+    (par / "q3tui.yaml").write_text("pipeline: {flow: spec, step_options: {rtl: {child_projects: [../cha]}}}\n")
+    parse_llm.vf.parsed.append(_par_spec(
+        requirements=[{"text": "The register shall hold the data.", "category": "functional", "rtl_modules": ["m_chb_top"]}],
+        modules=[{"name": "m_par_top", "description": "top", "instances": ["m_cha_top", "m_chb_top"]},
+                 {"name": "m_cha_top", "description": "counter"}, {"name": "m_chb_top", "description": "register"}]))
+    anyio.run(lambda: eng.run_step(eng.by_name["parse"]))
+    before = artifacts.read(eng.project, "structured_spec.json")
+    assert before["requirements"][0]["rtl_modules"] == ["m_chb_top"]
+
+    (par / "q3tui.yaml").write_text("pipeline: {flow: spec, step_options: {rtl: {child_projects: [../cha, ../chb]}}}\n")
+    eng = Engine(Project.open(par))
+    seen = _events(eng)
+    assert eng.evaluate(eng.by_name["parse"]).status == "stale"
+    anyio.run(lambda: eng.run_step(eng.by_name["parse"]))
+    assert len(calls(parse_llm, "parse_spec")) == 1
+    data = artifacts.read(eng.project, "structured_spec.json")
+    assert data["requirements"][0]["rtl_modules"] == ["m_par_top"]
+    assert {m["name"]: m.get("provided_by") for m in data["modules"]}["m_chb_top"] == "../chb"
+    assert any("maps to m_chb_top, a module of the child project ../chb: moved to m_par_top" in w for w in _said(seen, "warning"))
+    assert data != before
