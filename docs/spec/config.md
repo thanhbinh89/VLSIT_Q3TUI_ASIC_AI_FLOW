@@ -84,6 +84,9 @@ pipeline:
   max_fix_iterations: 5           # fix rounds (a step's triage → fixes → check loop) when the step sets no `max_fix_rounds`
   escalate_after_repeats: 2       # same finding, no progress → ask human
   step_options: {}                # per-step options on top of the flow file's: {rtl: {lint_max_warnings: 0}}
+                                  # rtl.child_projects: [../npu_ctl, /abs/npu_dma]: Q3TUI projects whose RTL this one uses read-only (rtl-flow.md "Child projects").
+                                  #   A list of non-empty strings (else the config does not load); relative to the project or absolute, `~` / `$VARS` expanded,
+                                  #   duplicates dropped. Read by the rtl step and by `parse` (of any flow); Settings → rtl
   step_flow: {}                   # per-step view / pass / notes overrides (/step; docs/spec/flows.md)
 
 spec:

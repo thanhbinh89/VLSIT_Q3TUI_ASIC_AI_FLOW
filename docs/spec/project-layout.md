@@ -59,6 +59,7 @@ it any time). Internal state lives in `.q3tui/`. A step names no folder: it asks
 
 The rtl flow keeps its own working files inside the RTL folder: `src/rtl/csr/` (register map, report, provided modules; `patches/`: the changes made
 to the generated modules since the tool made them, applied again when it makes them again),
+`src/rtl/child/provided.json` (the registry of the child projects' files copied read-only into `src/rtl/`; code writes it),
 `src/rtl/style_lint/` (Verible flags, findings) and `src/rtl/smoke/` (the smoke testbench and its report); see
 [rtl-flow.md](rtl-flow.md) "Layout". The dv flow ([dv-flow.md](dv-flow.md)) writes `src/tb/` (`project.tb_dir`) and the UVM artifacts
 (`golden_manifest.json`, `verification_contract.json`, `tb_architecture.json`, `vip_integration.json`, `dut_integration.json`, `dv_*.json`) and the

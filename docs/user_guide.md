@@ -383,6 +383,7 @@ e.g. Opus where precision matters, Haiku for mechanical/high-volume work.
 | `rtl.parallel` | int | Modules written at once. |
 | `rtl.max_fix_attempts` | int | Extra rounds when lint or synthesis still fail. |
 | `rtl.max_turns` | int | Agent turns for one module (write, compile, fix). |
+| `rtl.child_projects` | one path per line | Q3TUI projects whose RTL this one uses as it is (read-only), see [§10](#10-the-rtl-flow). |
 
 The coding rules are the rtl flow's own rule files, see [§5](#5-rtl-coding-rules).
 
@@ -467,6 +468,29 @@ spec → parse → config → rules → csr → rtl → format → style_lint �
 Tools: every role (`verible_lint`, `verible_format`, `csr_gen`, `sim` / `run` / `lint` / `synth`, …) comes from your `config/tools.json`; the flow has no defaults and there is no
 fallback. Start from the suggested reference set of `q3tui tools init` and adapt it. A missing tool makes its step wait and name the role. **Skills:** the LLM stages read playbooks (`config/skills/<name>/SKILL.md`); put your own in
 `<project>/config/skills/` to add or replace one. `q3tui act style_show` and `q3tui act csr_show` print what the flow decided.
+
+### Building a parent from child projects
+
+A parent that assembles sub-IPs which are Q3TUI projects themselves (`npu/`, `cha/`, `chb/` side by side) lists them in its `q3tui.yaml`:
+
+```yaml
+pipeline:
+  flow: rtl
+  step_options:
+    rtl:
+      child_projects: [../cha, ../chb]   # relative to this project, or absolute
+```
+
+Each child needs its own `q3tui.yaml` and a `filelist.f` in its RTL folder (run its rtl flow first). `q3tui --flow rtl run` in the parent copies the files the children's
+filelists list into `src/rtl/` byte for byte, writes only the parent's own modules (`m_par_top` instantiates the children's tops) and puts the children first in `filelist.f`.
+The child modules are not rule-checked, style-linted or edited.
+
+What you see: a warning per child that has not passed its own rtl flow (or changed since); `src/rtl/child/provided.json` (code writes it: unit, owner, source file, sha256);
+a hand edit of a copy is restored with a warning; lint findings in a child file are warnings that name the child. Editing a file in a child makes the parent's rtl step stale, and the
+next run copies it again. A question about a child module names the child.
+
+Where fixes go: into the child (`fix it in ../cha, then run this project again`). A change request `[rtl:m_cha_top] …`, a sanity / FPGA / ASIC hand-off or a synthesis error on a child module
+is refused or fails with that message; nothing is edited in the copy.
 
 ## 11. Unattended runs and the fix loop
 
