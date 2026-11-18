@@ -35,7 +35,7 @@ Implemented in `q3tui.llm.runtime`.
 | Model | `llm.model` (default `claude-sonnet-5-5`), `llm.effort`; per step `llm.steps` |
 | Working dir | project root |
 | Tools | explicit allow-list per stage. Read-only stages: `Read`, `Grep`, `Glob`. Code-writing stages add `Write`/`Edit` |
-| Visibility | enforced with a `PreToolUse` hook: `deny_dirs` (e.g. the TB stages are denied `src/rtl`), `write_dirs` / `write_files`; `.q3tui/` is always denied. The hook is the guarantee; the prompt instruction is backup |
+| Visibility | enforced with a `PreToolUse` hook: `deny_dirs` (e.g. the TB stages are denied `src/rtl`), `write_dirs` / `write_files`; `.q3tui/` is always denied; `read_only_files` are files no stage may write, reading them stays allowed (the child projects' copies and their registry: filled in `StepContext.llm` for every stage of every step, and for the TUI assistant). The hook is the guarantee; the prompt instruction is backup |
 | Q3TUI tools | in-process MCP server `q3tui` (`mcp__q3tui__*`): design facts, safe glob, step tools. Tools the LLM calls to close its own loop |
 | Permissions | `permission_mode="dontAsk"`; nothing outside the allow-list runs; `Bash` only for an allow-listed tool-role command |
 | Output | pydantic model → JSON schema → `output_format`; validated on return, re-asked in the same session |
