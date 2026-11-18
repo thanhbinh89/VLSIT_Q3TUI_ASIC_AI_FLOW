@@ -3,7 +3,8 @@
 The Sanity flow's waiver review proposes RTL / spec fixes; `sanity_handoff` sends them to the owner flow (rtl) as scoped change requests; the
 owner flow updates the RTL; the analysis runs again. Each round is measured by the violations still open after the waivers. The loop stops when
 nothing is open, when a round does not improve on the best one (the RTL of the best round is kept in `.q3tui/loop/best_rtl/`: `restore_best`),
-when nothing can be handed off, when a flow ends in a failure, or when the spend limit is reached.
+when nothing can be handed off, when a flow ends in a failure, or when the spend limit is reached. The copies of child projects' modules (and their
+registry) are never kept nor restored: no flow here writes them (the next rtl run puts any changed copy back).
 """
 
 from __future__ import annotations
@@ -53,13 +54,27 @@ def best_dir(project: Project) -> Path:
     return project.state_dir / "loop" / "best_rtl"
 
 
+def _child_files(rtl: Path) -> set[Path]:
+    """The copies of child projects' modules in `rtl` (the registry's files); none without child projects. A damaged registry names none: only
+    its `child/` folder is left out then (the next rtl run restores any copy that changed)."""
+    from q3tui.flows.rtl.lib import children
+
+    try:
+        records = children.read_registry(rtl)
+    except children.ChildError:
+        return set()
+    return {rtl / e["file"] for e in records.values() if isinstance(e.get("file"), str) and e["file"]}
+
+
 def _keep_best(project: Project, rnd: Round) -> Path:
     dest = best_dir(project)
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     rtl = project.rtl_dir
+    skip = _child_files(rtl)
     for f in sorted(rtl.rglob("*")):
-        if f.is_file() and "smoke" not in f.relative_to(rtl).parts and "style_lint" not in f.relative_to(rtl).parts:
+        if f.is_file() and "smoke" not in f.relative_to(rtl).parts and "style_lint" not in f.relative_to(rtl).parts and f not in skip \
+                and "child" not in f.relative_to(rtl).parts[:-1]:
             (dest / f.relative_to(rtl)).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dest / f.relative_to(rtl))
     write_json(dest.parent / "best.json", {"round": rnd.number, "open": rnd.open, "total": rnd.total, "at": datetime.now().isoformat(timespec="seconds")})
@@ -72,7 +87,9 @@ def restore_best(project: Project) -> str:
     info = read_json(src.parent / "best.json", None)
     if not src.is_dir() or not info:
         raise EngineError("no best round recorded: run `q3tui loop` first")
-    files = [f for f in sorted(src.rglob("*")) if f.is_file()]
+    skip = _child_files(project.rtl_dir)
+    files = [f for f in sorted(src.rglob("*")) if f.is_file() and project.rtl_dir / f.relative_to(src) not in skip
+             and "child" not in f.relative_to(src).parts[:-1]]
     project.backup([project.rtl_dir / f.relative_to(src) for f in files])
     for f in files:
         dest = project.rtl_dir / f.relative_to(src)

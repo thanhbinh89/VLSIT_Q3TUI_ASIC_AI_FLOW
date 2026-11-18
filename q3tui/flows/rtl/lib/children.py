@@ -410,13 +410,19 @@ def refusal(unit: str, entry: dict) -> str:
     return f"`{unit}` belongs to the child project {owner} (read-only here): fix it in {owner}, then run this project again"
 
 
+def project_of(child: Child) -> Project:
+    """The child's own project, laid out by its own q3tui.yaml (so its schemas / history are found where it keeps them). Read only: nothing
+    here writes into it."""
+    cfg, _ = _config(child.config)
+    return Project(child.root, cfg or Config())
+
+
 def status_warnings(child: Child, files: list[Path]) -> list[str]:
     """R11: a child used before its own rtl flow passed, or with files changed since it passed (`files` and its filelist), is used anyway, with
     a warning. Its history is read with its own layout (its q3tui.yaml), never written."""
     from q3tui.core import history
 
-    cfg, _ = _config(child.config)
-    project = Project(child.root, cfg or Config())
+    project = project_of(child)
     paths = list(dict.fromkeys(p for p in (_under(child.root, f) for f in [*files, child.filelist]) if p))
     try:
         rev = history.mark(project, "rtl")

@@ -78,6 +78,21 @@ def test_a_round_that_does_not_improve_stops_and_the_best_rtl_is_kept(loop_proj)
     assert "restored the RTL of round 0" in loop.restore_best(loop_proj) and rtl.read_text() == original
 
 
+def test_the_best_rtl_leaves_child_files_alone(loop_proj):
+    rtl = loop_proj.rtl_dir
+    (rtl / "child").mkdir()
+    (rtl / "child" / "provided.json").write_text(json.dumps({"cha": {"kind": "child", "owner": "../cha", "child": "../cha", "file": "cha.sv", "unit": "module", "instances": []}}))
+    (rtl / "cha.sv").write_text("module cha; endmodule\n")
+    rnd = loop.Round(0, 1, 1, 0.0)
+    dest = loop._keep_best(loop_proj, rnd)
+    assert (dest / "blk.sv").is_file() and not (dest / "cha.sv").exists() and not (dest / "child").exists()
+    (dest / "cha.sv").write_text("module other; endmodule\n")  # (a stale copy in the kept folder is not written back either)
+    (dest / "child").mkdir()
+    (dest / "child" / "provided.json").write_text("{}")
+    loop.restore_best(loop_proj)
+    assert (rtl / "cha.sv").read_text() == "module cha; endmodule\n" and "other" not in (rtl / "child" / "provided.json").read_text()
+
+
 def test_the_loop_stops_at_the_spend_limit_before_a_new_round(loop_proj):
     res = run_loop(loop_proj, max_cost_usd=0.0)
     assert res.stopped == "spend limit" and [r.number for r in res.rounds] == [0] and not res.ok

@@ -422,6 +422,50 @@ async def test_handoff_sends_the_fixes_to_the_owning_flow_but_not_the_sdc_reques
     assert {v.name: v for v in Engine(Project.open(proj.root)).status()}["cdc_waivers"].edited == []  # recording the hand-off is not a user edit
 
 
+async def test_a_cdc_fix_inside_a_child_module_is_not_handed_off(proj, monkeypatch):
+    from q3tui.llm import runtime
+
+    (proj.root / "flows").mkdir(exist_ok=True)
+    (proj.root / "flows" / "owner.yaml").write_text("name: owner\nsteps:\n  - {id: spec, kind: reads}\n  - {id: rtl, kind: reads, deps: [spec]}\n")
+    _tools(proj.root, extra="  step_options:\n    cdc_waivers:\n      handoff_flow: owner\n    rdc_waivers:\n      handoff_flow: owner\n")
+    (proj.root / "src" / "rtl" / "child").mkdir()
+    (proj.root / "src" / "rtl" / "child" / "provided.json").write_text(json.dumps(
+        {"blk": {"kind": "child", "owner": "../blk_ip", "child": "../blk_ip", "file": "blk.sv", "unit": "module", "instances": []}}))
+    monkeypatch.setattr(runtime, "run_stage", ReviewLLM(_decide))
+    eng = Engine(Project.open(proj.root))
+    await eng.run(yes=True, stop="cdc_waivers")
+    plan = json.loads((proj.schemas_dir / "cdc_waivers.json").read_text())
+    v2 = plan["items"][1]
+    assert v2["action"] == "ask" and "../blk_ip" in v2["question"] and "blk" in v2["question"]
+    assert [o for o in v2["options"]][0] == "Waive it here: the child project reviewed it" and "Fix it in ../blk_ip, then run this project again" in v2["options"]
+    with pytest.raises(EngineError, match="no fix to hand off"):
+        Ops(eng).run_action("sanity_handoff", ids="cdc:V2")
+    other = Engine(proj, flow=flows.load_flow("owner", proj.root))
+    assert not other.state.feedback.get("rtl")
+
+
+async def test_the_prompt_lists_the_child_modules_and_the_childs_reviewed_waivers(proj, monkeypatch):
+    from q3tui.llm import runtime
+
+    (proj.root / "src" / "rtl" / "child").mkdir()
+    (proj.root / "src" / "rtl" / "child" / "provided.json").write_text(json.dumps(
+        {"blk": {"kind": "child", "owner": "../blk_ip", "child": "../blk_ip", "file": "blk.sv", "unit": "module", "instances": []}}))
+    child = proj.root.parent / "blk_ip"
+    (child / "schemas").mkdir(parents=True)
+    (child / "q3tui.yaml").write_text("{}\n")
+    (child / "schemas" / "cdc_report.json").write_text(json.dumps({"violations": [
+        {"id": "V1", "tag": "CDC_CHILD_OK", "message": "a crossing in the child"}, {"id": "V2", "tag": "CDC_CHILD_FIX", "message": "another"}]}))
+    (child / "schemas" / "cdc_waivers.json").write_text(json.dumps({"items": [
+        {"id": "V1", "action": "waive", "reason": "gray coded in the child"}, {"id": "V2", "action": "fix_rtl", "reason": "needs a fix"}]}))
+    fake = ReviewLLM(_decide)
+    monkeypatch.setattr(runtime, "run_stage", fake)
+    await Engine(Project.open(proj.root)).run(yes=True, stop="cdc_waivers")
+    (stage,) = [s for s in fake.stages if s.name.startswith("cdc_waivers_")]
+    assert "## Modules of child projects (read-only here)" in stage.prompt and "`blk`" in stage.prompt and "../blk_ip" in stage.prompt
+    assert "CDC_CHILD_OK" in stage.prompt and "gray coded in the child" in stage.prompt
+    assert "CDC_CHILD_FIX" not in stage.prompt and "needs a fix" not in stage.prompt
+
+
 async def test_a_gate_offers_the_handoff(proj, monkeypatch):
     from q3tui.llm import runtime
 

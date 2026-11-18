@@ -13,6 +13,7 @@ def _handoff(ops, ids: str) -> str:
     from datetime import datetime
 
     from q3tui import flows
+    from q3tui.flows.rtl.lib import children
     from q3tui.flows.sanity.lib import waivers
     from q3tui.flows.sanity.lib.base import report_json
     from q3tui.flows.sanity.lib.review import WaiverStep
@@ -22,6 +23,10 @@ def _handoff(ops, ids: str) -> str:
     if not steps:
         raise EngineError("this flow has no waiver step")
     wanted = {i.strip().upper() for i in ids.split(",") if i.strip()}  # "V1,V3" or "cdc:V1" (each lane numbers its violations from V1)
+    try:
+        registry = children.read_registry(children.rtl_dir(ops.engine))
+    except children.ChildError as exc:
+        raise EngineError(str(exc)) from exc
     ops.engine.save()
     others: dict[str, Engine] = {}  # one engine per owner flow: each review hands off to its own handoff_flow
     sent = []
@@ -51,6 +56,10 @@ def _handoff(ops, ids: str) -> str:
                     sent.append(f"{step.role}:{d['id']} → sdc: {lines[0][:70]}")
                 continue
             if d["action"] not in ("fix_rtl", "spec"):
+                continue
+            entry = registry.get(d.get("module")) if d["action"] == "fix_rtl" else None
+            if entry is not None:  # (R3: a child's module is fixed in its own project, never by a change request here)
+                sent.append(f"{step.role}:{d['id']} not applied ({d['module']} belongs to the child project {entry.get('owner') or entry.get('child') or '?'}: fix it there)")
                 continue
             target, text = waivers.handoff_text(step.role, d, by_id[d["id"]])
             if target not in other.by_name:

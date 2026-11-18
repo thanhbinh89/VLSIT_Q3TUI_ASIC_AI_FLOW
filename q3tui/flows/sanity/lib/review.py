@@ -9,6 +9,9 @@ the RTL, the SDC and the spec, applies the knowledge (`<step>/md/knowledge.md`, 
   sdc     a constraint is missing or wrong in the SDC         → a request to YOU (the SDC is yours): the constraint to add, a question
   ask     a condition cannot be verified                      → a question to you, with suggested answers
 
+Modules copied from child projects are read-only here: a `fix_rtl` aimed at one becomes a question naming its owner (it is fixed or waived in
+the child), and the prompt lists the child's own reviewed waivers as context.
+
 Changes propagate as updates: a decision stays while the RTL, the SDC and the knowledge it was made on are unchanged; only new violations and
 the ones waiting for you (a new answer) go to the LLM again."""
 
@@ -21,9 +24,10 @@ from q3tui.flows.sanity.lib import memory, table, waivers
 from q3tui.flows.sanity.lib.base import SanityStep, report_json, waivers_json
 from q3tui.flows.sanity.lib.waivers import Decision, Review
 from q3tui.llm.runtime import Stage
-from q3tui.pipeline.base import StepContext
+from q3tui.pipeline.base import StepContext, StepFailed
 
 BATCH = 40  # violations per LLM stage (option `batch`)
+MAX_CHILD_WAIVERS = 20  # a child's reviewed waivers listed in the prompt (per child project)
 SDC_OPTIONS = [{"label": "I will update the SDC", "description": "you change constraints/sdc/ (sdc_add / sdc_set, the SDC tab); the analysis runs again"},
                {"label": "No SDC change: decide again", "description": "the review looks again, with this answer, for a design reason"}]
 
@@ -82,7 +86,36 @@ class WaiverStep(SanityStep):
         end = next((i for i, x in enumerate(lines) if x.startswith("check_")), None)
         return "\n".join(lines[start + 1:end]) if start is not None and end is not None else ""
 
-    def _prompt(self, engine, batch: list[dict], answers: dict[str, str], modules: list[str], prev_by_sig: dict | None = None) -> str:
+    def _child_block(self, engine, registry: dict[str, dict]) -> list[str]:
+        """The prompt's part about the child projects' modules (read-only here), with the waivers each child reviewed for its own findings: context
+        for `waive` (a finding inside a child module the child waived for a design reason), never a requirement. [] without child modules."""
+        from q3tui.flows.rtl.lib import children
+
+        if not registry:
+            return []
+        owners: dict[str, list[str]] = {}
+        for unit, e in sorted(registry.items()):
+            owners.setdefault(str(e.get("owner") or e.get("child") or "?"), []).append(unit)
+        lines = ["## Modules of child projects (read-only here)",
+                 "These modules are copies of another project's RTL: " + "; ".join(f"{', '.join(f'`{u}`' for u in units)} of {o}" for o, units in owners.items()) + ".",
+                 "A fix there is never `fix_rtl` in this project: it is made in the child project (or waived here). Decide `waive` when the child's reviewed "
+                 "waivers below or a design reason cover the finding, else `ask`.\n"]
+        for child in children.resolve(engine.project.root, list(owners)):
+            child_project = children.project_of(child)
+            report = read_json(child_project.schemas_dir / report_json(self.role), {}) or {}
+            plan = read_json(child_project.schemas_dir / waivers_json(self.role), {}) or {}
+            try:
+                by_id = {v["id"]: v for v in report.get("violations", [])}
+                listed = [(by_id[i["id"]], i) for i in plan.get("items", []) if i.get("action") == "waive" and i.get("id") in by_id][:MAX_CHILD_WAIVERS]
+                rows = [f"- `{v['tag']}`: {str(v.get('message', ''))[:200]} — reason: {str(i.get('reason', ''))[:260]}" for v, i in listed]
+            except (AttributeError, KeyError, TypeError):  # (context, not a requirement: a file that cannot be read lists nothing)
+                rows = []
+            if rows:
+                lines += [f"Waivers {child.label} reviewed for its own {self.role.upper()} findings:", *rows, ""]
+        return lines
+
+    def _prompt(self, engine, batch: list[dict], answers: dict[str, str], modules: list[str], prev_by_sig: dict | None = None,
+                registry: dict[str, dict] | None = None) -> str:
         role = self.role
         lines = [f"## {role.upper()} violations to decide (the tool's report: ground truth)",
                  f"Top `{self.top(engine)}`; RTL modules (src/rtl/<module>.sv): {', '.join(modules)}.",
@@ -104,7 +137,8 @@ class WaiverStep(SanityStep):
                 lines.append(f"  Your earlier decision for it: {p['action']}"
                              + (f" ({p.get('rule')})" if p.get("rule") else "") + f" — {(p.get('reason') or '')[:260]}. The RTL or SDC changed since: "
                              "check the evidence again and keep the decision if it still holds; change it only for a reason you can cite.")
-        lines += ["", waivers.knowledge(self.knowledge_file(), engine.project.config_dir, role)]
+        lines += [""] + self._child_block(engine, registry or {})
+        lines += [waivers.knowledge(self.knowledge_file(), engine.project.config_dir, role)]
         return "\n".join(lines)
 
     def _ask_repeated(self, d: Decision, v: dict, tries: list[dict]) -> Decision:
@@ -114,7 +148,8 @@ class WaiverStep(SanityStep):
                         question=f"{v['tag']} is still open after {len(tries)} hand-off(s) (last: {last['text'][:140]}). How should it be settled?",
                         options=["Decide it in the spec: say what the design must do", "Waive it: give the design reason", "Try another RTL fix: give a hint"])
 
-    def _validate(self, engine, out: Review, batch: list[dict], modules: list[str], answers: dict[str, str]) -> list[dict]:
+    def _validate(self, engine, out: Review, batch: list[dict], modules: list[str], answers: dict[str, str],
+                  registry: dict[str, dict] | None = None) -> list[dict]:
         by_id = {d.id: d for d in out.decisions}
         items = []
         for v in batch:
@@ -122,6 +157,12 @@ class WaiverStep(SanityStep):
                                                question=f"The review made no decision for {v['tag']}: {v['message'][:120]}. How should it be handled?")
             if d.action == "fix_rtl" and d.module not in modules:
                 d = Decision(id=d.id, action="spec", reason=d.reason, change=f"{d.change} (the review named the module '{d.module}', which is not in the RTL)")
+            if d.action == "fix_rtl" and d.module in (registry or {}):  # (R3: a child's module is never changed here: it is fixed or waived in its project)
+                owner = (registry[d.module].get("owner") or registry[d.module].get("child") or "?")
+                d = Decision(id=d.id, action="ask", reason=d.reason, change=d.change,
+                             question=f"{v['tag']} is inside {d.module}, a module of the child project {owner}: it is fixed or waived there. "
+                                      f"Waive it here with the child's reason, or wait for the fix in {owner}?",
+                             options=["Waive it here: the child project reviewed it", f"Fix it in {owner}, then run this project again"])
             if d.action == "fix_rtl" and memory.conflicts_with_requirement(d.reason, d.change):
                 # its own text says the change goes against a requirement: that is the spec's decision (or yours), never a silent RTL change
                 d = Decision(id=d.id, action="spec", reason=d.reason, change=f"{d.change} (an RTL change here would go against a requirement the reason cites: decide the requirement first)")
@@ -146,6 +187,12 @@ class WaiverStep(SanityStep):
 
     async def run(self, ctx: StepContext) -> None:
         engine, project, role = ctx.engine, ctx.project, self.role
+        from q3tui.flows.rtl.lib import children
+
+        try:
+            registry = children.read_registry(children.rtl_dir(engine))
+        except children.ChildError as exc:
+            raise StepFailed(str(exc)) from exc
         report = self.read(engine, report_json(role), {})
         violations = report.get("violations", [])
         prev = self.plan(engine)
@@ -166,11 +213,11 @@ class WaiverStep(SanityStep):
         size = int(self.options.get("batch") or BATCH)
         for n in range(0, len(todo), size):
             batch = todo[n:n + size]
-            stage = Stage(name=f"{role}_waivers_{n // size + 1}", system_prompt=self.system, prompt=self._prompt(engine, batch, answers, modules, prev_by_sig),
+            stage = Stage(name=f"{role}_waivers_{n // size + 1}", system_prompt=self.system, prompt=self._prompt(engine, batch, answers, modules, prev_by_sig, registry),
                           cwd=project.root, builtin_tools=["Read", "Grep", "Glob"], output_model=Review,
                           deny_dirs=[project.src_dir / "tb", project.src_dir / "sva", project.tb_dir, project.model_dir])
             out: Review = (await ctx.llm(stage)).output
-            for it in self._validate(engine, out, batch, modules, answers):
+            for it in self._validate(engine, out, batch, modules, answers, registry):
                 old = prev_by_sig.get(it["sig"])
                 it["handed_off"] = (old or {}).get("handed_off") if old and old["action"] == it["action"] and old.get("change") == it.get("change") else None
                 decided[it["id"]] = it
