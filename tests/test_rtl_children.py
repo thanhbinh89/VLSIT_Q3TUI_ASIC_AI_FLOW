@@ -685,3 +685,142 @@ def test_the_rtl_step_waits_for_its_children_and_a_readable_registry(tmp_path, t
     with pytest.raises(StepFailed, match="provided.json is damaged"):
         run_step(eng, "rtl")
     assert (rtl / "m_cha_top.sv").read_text() == CHA and len(calls(llm, "rtl_m_par_top")) == 1
+
+
+def test_a_middle_project_and_its_own_child_both_listed(tmp_path, tools_dir, llm):
+    """Ruling 6 (R9): a middle project and its own child both listed: the top instantiates the middle project's top only. The child's top is
+    instantiated inside the middle one already; a second instance in the top is one nobody asked for."""
+    pe = make_child(tmp_path, "npu_pe", {"m_pe_top.sv": PE})
+    make_child(tmp_path, "npu_core", {"m_pe_top.sv": PE, "m_core_top.sv": CORE}, lines=["src/rtl/m_pe_top.sv", "src/rtl/m_core_top.sv"],
+               registry=_pe_registry(pe))
+    eng = make_parent(tmp_path, tools_dir, ["../npu_core", "../npu_pe"])
+    spec = artifacts.read(eng.project, "structured_spec.json")
+    spec["modules"][0]["instances"] = []
+    artifacts.write(eng.project, "structured_spec.json", spec, check=False)
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_core_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    placed = [m for m in _said(seen, "log") if m.startswith("the spec names no module that instantiates")]
+    assert placed == ["the spec names no module that instantiates m_core_top: the top m_par_top does"]
+    (stage,) = calls(llm, "rtl_m_par_top")
+    assert "`m_core_top` → src/rtl/m_core_top.sv" in stage.prompt and "`m_pe_top` →" not in stage.prompt
+
+
+# -- findings and change requests on the child projects' units (R3, R4, R11) --------------------------------------------
+
+CHP = {  # a child whose module imports two packages (one not named *_pkg) and has an interface port
+    "chp_pkg.sv": "package chp_pkg;\n  localparam int unsigned PA_W = 8;\nendpackage\n",
+    "chp_types.sv": "package chp_types;\n  typedef logic [7:0] byte_t;\nendpackage\n",
+    "chp_if.sv": "interface chp_if;\n  logic v;\nendinterface\n",
+    "m_chp_top.sv": "module m_chp_top\n  import chp_pkg::*;\n  import chp_types::*;\n(\n  input  logic  i_clk,\n  chp_if        bus,\n"
+                    "  output byte_t o_q\n);\n  assign o_q = '0;\nendmodule\n",
+}
+
+
+def test_a_lint_finding_in_a_child_is_reported_not_fixed(tmp_path, tools_dir, llm):
+    """T5 (a), R4: a lint finding inside a child's module is reported for the child project (one warning naming it and where to fix it) and
+    counted in the report; no stage writes or fixes the child, and the design lint passes: this project's own code is clean."""
+    warned = CHA.replace("endmodule", "  // LINT_WARN\nendmodule")
+    make_child(tmp_path, "cha", {"m_cha_top.sv": warned})
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert eng.state.steps["rtl"].status == "done"
+    (w,) = [m for m in _said(seen, "warning") if "lint finding" in m]
+    assert w == ("m_cha_top (child project ../cha): 1 lint finding(s), not fixed here — fix it in ../cha, then run this project again: "
+                 "design lint warning UNUSED line 3: Signal is not used: 'x'")
+    assert not calls(llm, "rtl_m_cha_top") and len(calls(llm, "rtl_m_par_top")) == 1
+    assert (eng.project.rtl_dir / "m_cha_top.sv").read_text() == warned
+    rep = json.loads((eng.project.root / "schemas/synth_report.json").read_text())
+    assert rep["child_modules"]["m_cha_top"]["lint_findings"] == 1 and rep["child_modules"]["m_chb_top"]["lint_findings"] == 0
+    assert rep["lint"]["status"] == "pass" and rep["synthesis"] == "pass"
+
+
+def test_a_lint_error_in_a_child_is_no_problem_of_the_module_using_it(tmp_path, tools_dir, llm):
+    """R4: a lint error located in a child's file fails the lint run of the own module that reads it, but it is the child's: that module gets
+    no fix round for it (it is clean), and the design lint reports it for the child."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA.replace("endmodule", "  // LINT_ERR\nendmodule")})
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert eng.state.steps["rtl"].status == "done" and len(calls(llm, "rtl_m_par_top")) == 1
+    (w,) = [m for m in _said(seen, "warning") if "lint finding" in m]
+    assert w.startswith("m_cha_top (child project ../cha): 1 lint finding(s), not fixed here — fix it in ../cha") and "syntax error" in w
+    assert not [m for m in _said(seen, "warning") if "m_par_top" in m]
+
+
+def test_a_synthesis_error_in_a_child_fails_the_step_naming_it(tmp_path, tools_dir, llm):
+    """R4: a synthesis error located in a child's module is never sent to a fix (no round can fix it here): the step fails at once, naming the
+    module and the project to fix it in; this project's top, which synthesizes, is not blamed."""
+    make_child(tmp_path, "cha", {"m_cha_top.sv": CHA.replace("endmodule", "  // SYNTH_ERR\nendmodule")})
+    make_child(tmp_path, "chb", {"m_chb_top.sv": CHB})
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    seen = _events(eng)
+    with pytest.raises(StepFailed, match=r"m_cha_top.*\.\./cha") as exc:
+        run_step(eng, "rtl")
+    assert "m_cha_top is read-only here: a module of the child project ../cha: fix it in ../cha, then run this project again" in str(exc.value)
+    assert "Unsupported construct" in str(exc.value) and "synthesis fails" not in str(exc.value)
+    assert not calls(llm, "rtl_m_cha_top") and len(calls(llm, "rtl_m_par_top")) == 1
+    assert not [m for m in _said(seen, "warning") if m.startswith("synthesis failed")]  # (no fix round was announced)
+    assert json.loads((eng.project.root / "schemas/synth_report.json").read_text())["synthesis"] == "fail"
+
+
+def test_a_change_request_for_a_child_is_refused(tmp_path, tools_dir, llm):
+    """T5 (b), R3: a change request scoped to a child's module is refused, naming the project to make it in: never queued (before the first
+    copy the children's filelists name their units, after it the registry does), and dropped with a warning by a run that finds it queued
+    anyway. A request for this project's own module is queued as before."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    said = eng.request_change("rtl", "[rtl:m_cha_top] faster")
+    assert said.startswith("refused:") and "fix it in ../cha" in said and not eng.state.feedback.get("rtl")
+    eng.state.feedback["rtl"] = ["[rtl:m_cha_top] faster"]
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    assert [m for m in _said(seen, "warning") if "refused" in m] == [
+        "change request refused: `m_cha_top` belongs to the child project ../cha (read-only here): fix it in ../cha, then run this project again"]
+    assert not calls(llm, "rtl_m_cha_top") and (eng.project.rtl_dir / "m_cha_top.sv").read_text() == CHA
+    assert not eng.state.feedback.get("rtl") and eng.state.steps["rtl"].status == "done"  # (consumed: the run said why)
+    assert "fix it in ../chb" in eng.request_change("rtl", "[rtl:m_chb_top] wider")  # (from the registry now)
+    assert eng.request_change("rtl", "[rtl:m_par_top] faster").startswith("queued")
+
+
+def test_the_parent_warns_about_a_child_that_did_not_pass(tmp_path, tools_dir, llm):
+    """R11: a child project whose own rtl flow has not passed (no history mark passed/rtl) is used anyway, with a warning."""
+    _cha_chb(tmp_path)
+    eng = make_parent(tmp_path, tools_dir, ["../cha", "../chb"])
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_cha_top", "m_chb_top"]}}
+    seen = _events(eng)
+    run_step(eng, "rtl")
+    warned = _said(seen, "warning")
+    assert "child project ../cha has not passed its own rtl flow (no history mark passed/rtl)" in warned
+    assert "child project ../chb has not passed its own rtl flow (no history mark passed/rtl)" in warned
+    assert eng.state.steps["rtl"].status == "done"
+
+
+def test_child_packages_and_interfaces_are_linted_with_the_module_using_them_and_update_it(tmp_path, tools_dir, llm):
+    """Ruling 7: an own module that uses a child unit is linted with the child projects' packages and interfaces (their files first, in the
+    registry's order, a package named *_pkg once), and is updated when one of them changes (by its text: a type it may use changed)."""
+    child = make_child(tmp_path, "chp", CHP)
+    eng = make_parent(tmp_path, tools_dir, ["../chp"])
+    spec = artifacts.read(eng.project, "structured_spec.json")
+    spec["modules"][0]["instances"] = ["m_chp_top"]
+    artifacts.write(eng.project, "structured_spec.json", spec, check=False)
+    llm.vlsit_modules = {"m_par_top": {"reqs": ["REQ-001"], "children": ["m_chp_top"]}}
+    run_step(eng, "rtl")
+    rtl = eng.project.rtl_dir
+    units = children.read_registry(rtl)
+    assert [units[u]["unit"] for u in ("chp_pkg", "chp_types", "chp_if", "m_chp_top")] == ["package", "package", "interface", "module"]
+    listed = (eng.project.root / "build/sim/rtl/lint_m_par_top.f").read_text().split()
+    assert listed == [str((rtl / f).resolve()) for f in ("chp_pkg.sv", "chp_types.sv", "chp_if.sv", "m_chp_top.sv", "m_par_top.sv")]
+    assert set(eng.state.step_meta["rtl"]["modules"]["m_par_top"]["built_from"]["children"]) == {"chp_pkg", "chp_types", "chp_if", "m_chp_top"}
+    (child / "src/rtl/chp_types.sv").write_text(CHP["chp_types.sv"].replace("[7:0]", "[15:0]"))
+    assert eng.evaluate(eng.by_name["rtl"]).status == "stale"
+    run_step(eng, "rtl")
+    first, second = calls(llm, "rtl_m_par_top")
+    assert "`chp_types` changed" in second.prompt and "`m_chp_top` changed" not in second.prompt

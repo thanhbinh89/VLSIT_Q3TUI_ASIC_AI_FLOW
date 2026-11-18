@@ -19,7 +19,11 @@ problem in one is fixed there. Every run first copies the files each child's `fi
 with the instances their own project gave them (the own modules the spec names instantiate them, else the top does), first in the filelist,
 in the design lint and the synthesis; this step never writes, rule-checks, REQ-tags or fixes them. The children's files, the registry and the
 copies are inputs: a child's change makes the step stale and the next run copies it again, a copy edited here is restored. An own module that
-instantiates a child module follows its interface (`children.header`), not its body: a fix inside the child writes nothing here."""
+instantiates a child module follows its interface (`children.header`), not its body: a fix inside the child writes nothing here; the children's
+packages and interfaces it may take types from are read with it (its lint) and by their text (a change updates it). A lint finding or a
+synthesis error located in a child's unit is reported for the project that owns it, never sent to a fix round: the lint finding as a warning
+(counted in the report), the synthesis error by failing the step. A change request scoped to a child's unit is refused, naming that project
+(`refuse_change`)."""
 
 from __future__ import annotations
 
@@ -28,9 +32,10 @@ from pathlib import Path
 from q3tui.core.project import sha256_file, sha256_json
 
 from q3tui.flows.rtl.lib import children, csr, patches, rules
-from q3tui.flows.rtl.rtl.plan import PlanModule, RtlPlan, _names
+from q3tui.flows.rtl.rtl.plan import PlanModule, RtlPlan, _names, dependencies
 from q3tui.flows.rtl.rtl.gen import RtlGenStep
 from q3tui.pipeline.base import StepContext, StepFailed
+from q3tui.steps.common import split_feedback
 
 
 class Step(RtlGenStep):
@@ -93,9 +98,44 @@ class Step(RtlGenStep):
     async def run(self, ctx: StepContext) -> None:
         self._project = ctx.project
         rtl = self.lay(ctx.engine).rtl
-        self._provided_now = set(csr.read_provided(rtl))  # (the csr step's modules: generated, fixed in place; the children's are `_children_now`)
-        self._children_now, self._copied_now = self._copy_children(ctx, rtl, self._provided_now)  # (first: everything after reads the copies)
+        self._generated_now = set(csr.read_provided(rtl))  # (the csr step's modules: generated, fixed in place; the children's: `_child_registry`)
+        self._children_now, self._copied_now = self._copy_children(ctx, rtl, self._generated_now)  # (first: everything after reads the copies)
+        ctx.feedback = self._not_refused(ctx)
         await super().run(ctx)
+
+    @property
+    def _child_registry(self) -> dict[str, dict]:
+        """The child projects' units of this run: unit -> its registry record, as the copy left it ({} before a run, and without children)."""
+        return getattr(self, "_children_now", {})
+
+    def refuse_change(self, engine, text: str) -> str | None:
+        """R3: a change request scoped to a child project's unit (`[rtl:m_cha_top] …`: yours, or a flow's hand-off) is not this project's to
+        make: refused, naming the project to make it in. The units are the registry's; before the first copy (or with a damaged registry)
+        the children's filelists name them."""
+        by_unit, _ = split_feedback([text.strip()], self.name)
+        unit = next(iter(by_unit), None)
+        if unit is None:
+            return None
+        try:
+            kids = children.read_registry(self.lay(engine).rtl)
+        except children.ChildError:
+            kids = {}
+        if not kids:
+            kids = {u: {"owner": owner} for u, owner in children.units_by_owner(engine.project.root, children.configured(engine)).items()}
+        return children.refusal(unit, kids[unit]) if unit in kids else None
+
+    def _not_refused(self, ctx: StepContext) -> list[str]:
+        """The change requests this run acts on: one scoped to a child's unit is dropped with a warning saying where to make it. It can be
+        queued without `request_change` (written into pipeline.json, or queued before the unit was a child's). A new list: the engine empties
+        its queue by the list it gave the run, so a refused request leaves the queue too."""
+        kept = []
+        for f in ctx.feedback:
+            why = self.refuse_change(ctx.engine, f)
+            if why:
+                ctx.emit("warning", message=f"change request refused: {why}")
+            else:
+                kept.append(f)
+        return kept
 
     def _copy_children(self, ctx: StepContext, rtl: Path, own: set[str]) -> tuple[dict[str, dict], set[str]]:
         """The child projects' files, copied into the RTL folder (R2): (the registry, the units whose copy is new this run). No work at all
@@ -128,7 +168,7 @@ class Step(RtlGenStep):
         """The plan, with the provided modules in it: the child projects' (`_with_children`); the parent instantiates the CSR (and the CSR its
         synchronizer)."""
         plan = await super()._plan(ctx, spec, reqs, spec_files)
-        kids = getattr(self, "_children_now", {})
+        kids = self._child_registry
         if kids:
             plan = self._with_children(ctx, plan, spec, kids)
         prov = csr.read_provided(self.lay(ctx.engine).rtl)
@@ -180,52 +220,74 @@ class Step(RtlGenStep):
     # -- the child projects' units in the design (hooks of RtlGenStep) ------------------------------------------------------
 
     def _unit_files(self, engine) -> dict[str, Path]:
-        return _copies(self.lay(engine).rtl, getattr(self, "_children_now", {}))
+        return _copies(self.lay(engine).rtl, self._child_registry)
 
     def _read_only_units(self, run) -> dict[str, str]:
         return {u: f"a module of the child project {e['owner']}: fix it in {e['owner']}, then run this project again"
-                for u, e in getattr(self, "_children_now", {}).items()}
+                for u, e in self._child_registry.items()}
 
     def _order(self, run) -> list[str]:
         """The child projects' files first, in the order their own filelists give (a child's packages before what uses them), then this
         project's (R5: a module after the modules it instantiates)."""
-        kids = list(getattr(self, "_children_now", {}))
+        kids = list(self._child_registry)
         return [*kids, *[n for n in super()._order(run) if n not in kids]]
 
+    def _child_types(self, deps: list[str]) -> list[str]:
+        """The child projects' packages and interfaces (registry `unit` other than module), in the registry's order, for a module whose
+        dependencies `deps` hold a child unit: a child module's ports may be of their types (its header imports them), and a package not
+        named *_pkg is no dependency of the plan. [] for a module that uses no child unit."""
+        kids = self._child_registry
+        if not any(d in kids for d in deps):
+            return []
+        return [u for u, e in kids.items() if e.get("unit", "module") != "module"]
+
+    def _lint_units(self, run, module: str) -> list[str]:
+        """The child projects' packages and interfaces first (a child module's header needs them), then the rest of what `module` depends on
+        (a package named *_pkg is in both: listed once)."""
+        deps = super()._lint_units(run, module)
+        types = self._child_types(deps)
+        return [*types, *[d for d in deps if d not in types]]
+
     def _child_ref(self, run, name: str) -> str:
-        e = getattr(self, "_children_now", {}).get(name)
+        e = self._child_registry.get(name)
         ref = super()._child_ref(run, name)
         return f"{ref} (dự án con {e['owner']}: chỉ đọc, không sửa)" if e else ref
 
     def _report_extra(self, run) -> dict:
-        """R12: the child projects' modules, apart from this project's own (`modules`), each with its owner and the file it is a copy of."""
-        kids = getattr(self, "_children_now", {})
+        """R12: the child projects' modules, apart from this project's own (`modules`), each with its owner, the file it is a copy of and the
+        design lint's findings in it (`_full_lint`: reported, not fixed here)."""
+        kids = self._child_registry
         if not kids:
             return {}
         rel = run.ctx.project.rel
         return {"child_modules": {u: {"file": rel(run.file(u)), "owner": e["owner"], "child": e["child"], "source": e["source"],
-                                      "sha256": e["sha256"], "lint_findings": 0} for u, e in kids.items()}}
+                                      "sha256": e["sha256"], "lint_findings": (run.lint_state.get(u) or {}).get("lint_findings", 0)}
+                                  for u, e in kids.items()}}
 
     def _keep_generated(self) -> bool:
         return bool(self.options.get("keep_generated"))
 
     def _snapshot(self, run, pm: PlanModule) -> dict:
         snap = super()._snapshot(run, pm)
-        for c in set(snap["children"]) & getattr(self, "_provided_now", set()):  # a generated child: its ports, not its text
+        for c in set(snap["children"]) & getattr(self, "_generated_now", set()):  # a generated child: its ports, not its text
             f = run.file(c)  # (a lint fix inside the CSR module is no change for the parent that instantiates it)
             snap["children"][c] = sha256_json(csr.ports(f.read_text())) if f.is_file() else ""
-        kids = getattr(self, "_children_now", {})
+        kids = self._child_registry
         for c in set(snap["children"]) & set(kids):  # a child project's module: its interface, not its body (a fix inside it is no change here)
             f = run.file(c)
             if kids[c].get("unit", "module") == "module" and f.is_file():  # (a package, an interface: by text; header() ends at their first `;`)
                 snap["children"][c] = sha256_json(children.header(f.read_text(), c))
+        for c in self._child_types(dependencies(run.plan, pm.name)):  # the children's packages and interfaces, by text: a type it may use
+            if c not in snap["children"]:  # (a package named *_pkg is counted already)
+                f = run.file(c)
+                snap["children"][c] = sha256_json(f.read_text()) if f.is_file() else ""
         return snap
 
     def _check_module(self, run, pm: PlanModule) -> list[str]:
-        if pm.name in getattr(self, "_children_now", {}):  # (checked in its own project, never here: R4)
+        if pm.name in self._child_registry:  # (checked in its own project, never here: R4)
             run.lint_state[pm.name] = {"status": "provided"}
             return []
-        if pm.name not in getattr(self, "_provided_now", set()):
+        if pm.name not in getattr(self, "_generated_now", set()):
             return super()._check_module(run, pm)
         # generated: lint only (the RTL rules and REQ tags are not the generator's, KI-1 of docs/spec/rtl-flow.md)
         problems, warnings, ran = self._lint(run, pm.name)
@@ -233,12 +295,12 @@ class Step(RtlGenStep):
         return problems
 
     async def _work(self, run, pm: PlanModule, todo: bool) -> list[str]:
-        if pm.name in getattr(self, "_children_now", {}):  # a child project's module: copied as it is, never written, checked or fixed here (R3, R4)
+        if pm.name in self._child_registry:  # a child project's module: copied as it is, never written, checked or fixed here (R3, R4)
             run.lint_state[pm.name] = {"status": "provided"}
             if pm.name in getattr(self, "_copied_now", set()):
                 run.wrote.add(pm.name)  # (a new copy is a new design: synthesis runs again, the result is not the one you approved)
             return []
-        if pm.name not in getattr(self, "_provided_now", set()):
+        if pm.name not in getattr(self, "_generated_now", set()):
             return await super()._work(run, pm, todo)
         ctx, path = run.ctx, run.file(pm.name)
         if not path.is_file():
@@ -291,9 +353,9 @@ class Step(RtlGenStep):
         return problems
 
     async def _fix(self, run, pm: PlanModule, problems: list[str]) -> None:
-        if pm.name in getattr(self, "_children_now", {}):  # (read-only here: a child's problem is fixed in its own project)
+        if pm.name in self._child_registry:  # (read-only here: a child's problem is fixed in its own project)
             return
-        if pm.name not in getattr(self, "_provided_now", set()):
+        if pm.name not in getattr(self, "_generated_now", set()):
             await super()._fix(run, pm, problems)
             return
         if self._keep_generated():
@@ -318,12 +380,31 @@ class Step(RtlGenStep):
                 rec.outputs[rel] = sha256_file(path)
 
     def _full_lint(self, run) -> dict[str, list[str]]:
-        per = super()._full_lint(run)
+        per = self._child_findings(run, super()._full_lint(run))
         if not self._keep_generated():
             return per  # (findings in the generated modules go to their fix like any module's)
-        for name in getattr(self, "_provided_now", set()) & set(per):
+        for name in getattr(self, "_generated_now", set()) & set(per):
             run.ctx.emit("warning", message=f"{name} (generated by the APB-CSR-Generator): {len(per[name])} lint finding(s), not fixed here — "
                                             + "; ".join(per.pop(name)[:2]))
+        return per
+
+    def _child_findings(self, run, per: dict[str, list[str]]) -> dict[str, list[str]]:
+        """R4: the design lint's findings located in a child project's unit (`per` is keyed by the file they are in, without its suffix) are
+        reported for the project that owns it, one warning per unit, counted in the report's `child_modules`, and taken out: they are fixed
+        there, never in a fix round here. With only those, the design lint passes: what this project wrote is clean."""
+        kids = self._child_registry
+        if not kids:
+            return per
+        for u, e in kids.items():
+            found = per.pop(run.file(u).stem, [])
+            run.lint_state.setdefault(u, {"status": "provided"})["lint_findings"] = len(found)
+            if found:
+                owner = e["owner"]
+                run.ctx.emit("warning", message=f"{u} (child project {owner}): {len(found)} lint finding(s), not fixed here — fix it in {owner}, "
+                                                f"then run this project again: " + "; ".join(found[:2])
+                                                + (f" (+{len(found) - 2} more)" if len(found) > 2 else ""))
+        if not per:  # (the base failed the design lint on the children's findings alone, or passed it already)
+            run.lint_state["__design__"]["status"] = "pass"
         return per
 
 

@@ -207,7 +207,9 @@ class RtlGenStep(VlsitStep):
 
     def _read_only_units(self, run: _Run) -> dict[str, str]:
         """unit -> why it is read-only here. Such a unit is part of the design (plan, filelist, lint, synthesis) but not this project's: it is
-        never written, checked or fixed by this step, and the report's `modules` leave it out (`_report_extra` reports it)."""
+        never written, checked or fixed by this step, and the report's `modules` leave it out (`_report_extra` reports it). An error located
+        in its file is not a problem of the modules that read it, and never goes to a fix round (no round here can fix it): a synthesis
+        error there fails the step naming the unit and why."""
         return {}
 
     def _order(self, run: _Run) -> list[str]:
@@ -224,8 +226,12 @@ class RtlGenStep(VlsitStep):
 
     # -- checks (code) --------------------------------------------------------------------------------
 
+    def _lint_units(self, run: _Run, module: str) -> list[str]:
+        """The units whose files the lint of `module` reads before its own, in compile order: the packages, then what it instantiates."""
+        return dependencies(run.plan, module)
+
     def _lint_filelist(self, run: _Run, module: str) -> Path:
-        deps = [d for d in dependencies(run.plan, module) if run.file(d).is_file()]
+        deps = [d for d in self._lint_units(run, module) if run.file(d).is_file()]
         files = [run.file(d) for d in deps] + [run.file(module)]
         work = run.lay.sim / "rtl"
         work.mkdir(parents=True, exist_ok=True)
@@ -257,8 +263,10 @@ class RtlGenStep(VlsitStep):
         if len(warns) > limit:
             problems += [f"lint warning {d.code}{f' line {d.line}' if d.line else ''}: {d.message}" for d in warns]
         if not res.ok and not errors and not problems:  # the tool failed without a diagnostic of this file
-            others = [d for d in res.diagnostics if d.severity == "error"]
-            # (findings only in other files, e.g. a child's warnings under -Wall: theirs, checked with that module)
+            read_only = {run.file(u).name for u in self._read_only_units(run)}
+            others = [d for d in res.diagnostics if d.severity == "error" and not (d.file and Path(d.file).name in read_only)]
+            # (findings only in other files, e.g. a child's warnings under -Wall: theirs, checked with that module; an error in a read-only
+            # unit is not this module's either, and nothing here can fix it: the design lint reports it for that unit)
             if others or (res.returncode not in (0,) and not res.diagnostics):
                 problems.append(f"lint tool failed (rc={res.returncode}): " + "; ".join(f"{d.file}: {d.message}" for d in others[:3]))
         return problems, len(warns), True
@@ -584,6 +592,9 @@ class RtlGenStep(VlsitStep):
         work = lay.sim / "rtl"
         work.mkdir(parents=True, exist_ok=True)
         by_name = run.by_name()
+        read_only = self._read_only_units(run)
+        own: dict[str, list[str]] = {}  # the last synthesis' errors by module: this project's own, and the read-only units' (never fixed here)
+        theirs: dict[str, list[str]] = {}
         for rnd in range(max(1, ctx.cfg.pipeline.max_fix_iterations)):
             statuses, errors = {}, {}
             backend = synth.backend_for(run.tools.roles["synth"].parse, self.options)
@@ -626,17 +637,24 @@ class RtlGenStep(VlsitStep):
             for by_mod in errors.values():
                 for m, lines in by_mod.items():
                     per.setdefault(m if m in by_name else top, []).extend(f"synthesis: {ln}" for ln in lines)
-            ctx.emit("warning", message=f"synthesis failed: {', '.join(per)} get the log; fixing …")
+            theirs = {m: lines for m, lines in per.items() if m in read_only}
+            own = {m: lines for m, lines in per.items() if m not in read_only}
+            if theirs and not own:  # only errors no round here can fix: another round would synthesize the same files again
+                break
+            ctx.emit("warning", message=f"synthesis failed: {', '.join(own)} get the log; fixing …")
             async with anyio.create_task_group() as tg:
-                for m, probs in per.items():
+                for m, probs in own.items():
                     async def fix(m=m, probs=probs):
                         async with limiter:
                             await self._fix(run, by_name[m], probs)
                     tg.start_soon(fix)
             files = [run.file(n).resolve() for n in order if run.file(n).is_file()]
         if report["synthesis"] == "fail":
-            leftover.setdefault(top, []).append("synthesis fails: " + "; ".join(
-                f"{k}: {v['status']}" for k, v in report["corners"].items()) + " (see the synth logs under .q3tui/sim/rtl)")
+            for u, lines in theirs.items():  # (why first: a failure shows each module's first lines only)
+                leftover.setdefault(u, []).extend([f"{u} is read-only here: {read_only[u]}", *lines])
+            if own or not theirs:  # (the top is blamed for this project's own errors, never for a read-only unit's alone)
+                leftover.setdefault(top, []).append("synthesis fails: " + "; ".join(
+                    f"{k}: {v['status']}" for k, v in report["corners"].items()) + " (see the synth logs under .q3tui/sim/rtl)")
         meta["synth_hash"] = sha256_json({"files": [f.read_text() for f in files], "opt": self.options.get("synth"), "top": top})
         return report
 

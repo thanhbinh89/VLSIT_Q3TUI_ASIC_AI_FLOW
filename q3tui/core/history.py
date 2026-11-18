@@ -12,8 +12,9 @@ import functools
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,9 +70,13 @@ def _env(project) -> dict:
     return env
 
 
-def _git(project, *args: str, input: str | None = None, check: bool = True) -> str:
+def _git(project, *args: str, input: str | None = None, check: bool = True, index: Path | None = None) -> str:
+    """`index`: the index git reads and writes instead of the history's own (GIT_INDEX_FILE)."""
+    env = _env(project)
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     try:
-        r = subprocess.run(["git", "-c", "core.quotepath=off", "-c", "safe.directory=*", *args], cwd=project.root, env=_env(project),
+        r = subprocess.run(["git", "-c", "core.quotepath=off", "-c", "safe.directory=*", *args], cwd=project.root, env=env,
                            input=input, capture_output=True, text=True, errors="replace")
     except OSError as exc:
         raise HistoryError(f"git could not run: {exc}") from exc
@@ -202,10 +207,19 @@ def mark(project, flow: str) -> str | None:
 def changed_since(project, rev: str, paths: list[str]) -> list[str]:
     """The files of `paths` (relative to the project root) whose content in the project folder now differs from version `rev`, whether or
     not a version was recorded since (the work tree, not the last version: what was edited after `rev`). No paths: none (git would take
-    every file)."""
+    every file).
+
+    It reads the history and never writes it: an integration project asks it of each child project on every run. `git diff` refreshes the
+    index it compares with and writes it back (`--no-optional-locks` keeps only `git status` from that), so it compares with a scratch copy:
+    the same answer, and the project's own index is neither rewritten nor locked while that project records a version."""
     if not paths:
         return []
-    return [f for f in _git(project, "diff", "--name-only", rev, "--", *paths).splitlines() if f.strip()]
+    with tempfile.TemporaryDirectory(prefix="q3tui-history-") as tmp:
+        scratch = Path(tmp) / "index"
+        with suppress(FileNotFoundError):  # (no index yet: git reads none, as it would from the history)
+            shutil.copyfile(folder(project) / "index", scratch)
+        out = _git(project, "diff", "--name-only", rev, "--", *paths, index=scratch)
+    return [f for f in out.splitlines() if f.strip()]
 
 
 def diff(project, a: str, b: str | None = MAIN, paths: list[str] | None = None, max_lines: int | None = None) -> str:

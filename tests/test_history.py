@@ -5,6 +5,7 @@ the module's diff since then."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -15,6 +16,7 @@ from click.testing import CliRunner
 from q3tui import flows
 from q3tui.core import history
 from q3tui.core.cli import main
+from q3tui.core.config import Config
 from q3tui.core.ops import Ops
 from q3tui.core.project import Project
 from q3tui.pipeline.base import StepFailed
@@ -76,6 +78,22 @@ def test_the_history_leaves_out_build_and_state_and_never_touches_your_own_git(t
     mine = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout
     assert mine and all(line.startswith("??") for line in mine.splitlines())  # (your git: nothing staged, nothing committed)
     assert subprocess.run(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd=root, capture_output=True).returncode != 0
+
+
+def test_what_changed_since_a_version_is_read_without_writing_the_history(tmp_path):
+    """An integration project reads its child projects' history on every run (flows/rtl/lib/children.py): `changed_since` never writes that
+    history. A file only touched since (its content the same) is no change, and the project's own index stays as it was."""
+    project = Project(tmp_path, Config())
+    (tmp_path / "a.sv").write_text("module a; endmodule\n")
+    (tmp_path / "b.sv").write_text("module b; endmodule\n")
+    rev = history.record(project, "a version", mark="rtl")
+    index = history.folder(project) / "index"
+    before = index.read_bytes()
+    st = (tmp_path / "a.sv").stat()
+    os.utime(tmp_path / "a.sv", ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))  # (touched: git refreshes its index for it)
+    (tmp_path / "b.sv").write_text("module b; wire w; endmodule\n")
+    assert history.changed_since(project, rev, ["a.sv", "b.sv", "c.sv"]) == ["b.sv"]
+    assert index.read_bytes() == before
 
 
 def test_no_history_when_it_is_off(tmp_path):
