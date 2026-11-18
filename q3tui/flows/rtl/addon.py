@@ -30,6 +30,9 @@ def register(api) -> None:
     api.setting("rtl", "keep_generated", "Never edit generated RTL", "bool",
                 "Off (default): lint findings in the generated CSR module are fixed in place (name and ports kept); the fix stays "
                 "until the register map changes. On: they are only reported (the module stays as the APB-CSR-Generator made it).")
+    api.setting("rtl", "child_projects", "Child projects (read-only RTL)", "lines",
+                "One project root per line, relative to this project or absolute. The files of each one's src/rtl/filelist.f are copied "
+                "unchanged into this project and are read-only here; a fix goes to that project.")
     api.setting("csr", "mode", "CSR generation", "choice", "auto: generate the registers with the APB-CSR-Generator when the spec has software-visible registers; on: always; off: never.",
                 (("auto", "auto — when the spec has registers"), ("on", "on — always"), ("off", "off — never")))
     api.setting("csr", "tool_dir", "APB-CSR-Generator folder", "text", "Empty: $CSR_GEN_HOME, ~/.q3tui/tools/APB-CSR-Generator, <project>/tools/APB-CSR-Generator "

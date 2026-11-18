@@ -202,6 +202,17 @@ class PipelineConfig(_Strict):
     chain: list[str] = Field(default_factory=lambda: ["spec", "rtl", "dv", "sanity", "fpga"])
     chain_max_runs: int = Field(3, ge=1, le=10)
 
+    @model_validator(mode="after")
+    def _child_projects(self):
+        """`child_projects` (rtl flow, docs/spec/rtl-flow.md) is read by code before any step runs: refuse a wrong shape here, not deep in a run."""
+        for step, opts in self.step_options.items():
+            v = opts.get("child_projects") if isinstance(opts, dict) else None
+            if isinstance(opts, dict) and "child_projects" in opts and not (
+                    isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v)):
+                raise ValueError(f"pipeline.step_options.{step}.child_projects: a list of project folders "
+                                 f"(relative to this project or absolute), got {v!r}")
+        return self
+
 
 class SpecConfig(_Strict):
     self_review: bool = True  # second LLM pass that critiques and revises the draft
