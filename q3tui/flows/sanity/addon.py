@@ -73,7 +73,8 @@ def _handoff(ops, ids: str) -> str:
 
         table.write(step.table_files(ops.engine), step.role, step.read(ops.engine, report_json(step.role), {}) or {}, plan)
     if not any("not applied" not in s for s in sent):
-        raise EngineError("no fix to hand off (run a waiver step first, or they were handed off already)")
+        skipped = [x for x in sent if "not applied" in x]  # (R3: the user sees why a fix on a child module was refused)
+        raise EngineError("no fix to hand off (run a waiver step first, or they were handed off already)" + (": " + "; ".join(skipped) if skipped else ""))
     ops.engine.reload()
     for step in steps:  # (the hand-off is recorded in the output: not a user edit of the step's output)
         rec = ops.engine.state.steps.get(step.name)

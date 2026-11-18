@@ -461,8 +461,9 @@ async def test_a_stored_fix_on_a_child_module_is_not_handed_off(proj, monkeypatc
     (proj.root / "src" / "rtl" / "child").mkdir()
     (proj.root / "src" / "rtl" / "child" / "provided.json").write_text(json.dumps(_BLK_CHILD))
     eng = Engine(Project.open(proj.root))
-    with pytest.raises(EngineError, match="no fix to hand off"):
+    with pytest.raises(EngineError, match="no fix to hand off") as exc:
         Ops(eng).run_action("sanity_handoff", ids="cdc:V2")
+    assert "not applied" in str(exc.value) and "../blk_ip" in str(exc.value)
     assert not Engine(proj, flow=flows.load_flow("owner", proj.root)).state.feedback.get("rtl")
     assert json.loads((proj.schemas_dir / "cdc_waivers.json").read_text())["items"][1].get("handed_off") is None
 
