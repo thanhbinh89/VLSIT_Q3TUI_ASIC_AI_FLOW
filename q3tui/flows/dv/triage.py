@@ -413,7 +413,7 @@ def _generated_block(rtl_dir: Path, cfg) -> list[str]:
         how = ("The rtl flow changes them in place on an RTL change request (name, ports and registers kept) and keeps the change as a patch "
                "(src/rtl/csr/patches/) applied again when the module is generated again: a bug in one is an rtl_bug for it, unless the specification "
                "forbids editing it; then it is a spec_issue whose proposal names the choices (fix the generator, allow the change in place, or revise the spec).")
-    return ["## Generated RTL", f"Made by the APB-CSR-Generator (the rtl flow's csr step), not by hand: {', '.join(made)}. {how}", ""]
+    return ["## Generated RTL", f"Made by the CSR generator (the rtl flow's csr step), not by hand: {', '.join(made)}. {how}", ""]
 
 
 def _child_block(rtl_dir: Path) -> list[str]:

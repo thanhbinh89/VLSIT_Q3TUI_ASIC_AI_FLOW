@@ -100,7 +100,24 @@ class SmokeTriage(BaseModel):
     verdicts: list[Verdict]
 
 
-# -- csr (the APB-CSR-Generator's register map) ----------------------------------------------------------------------
+# -- csr (the CSR generator's register map) ---------------------------------------------------------------------------
+
+def _bus(v):
+    """A register-block bus as people write it (`APB`, `axi4-lite`, `AXIL`, `AHB`) in the map's spelling."""
+    if isinstance(v, str):
+        t = v.strip().upper().replace("_", "-").replace(" ", "-")
+        if t in ("APB", "APB4", "AMBA-APB", "AMBA-APB4"):
+            return "APB4"
+        if t in ("AXI", "AXIL", "AXI-LITE", "AXI4-LITE", "AXI4L", "AMBA-AXI4-LITE"):
+            return "AXI4-Lite"
+        if t in ("AHB", "AHBL", "AHB-LITE", "AHB3-LITE", "AMBA-AHB-LITE"):
+            return "AHB-Lite"
+    return v
+
+
+def _upper(v):
+    return v.strip().upper().replace("-", "_").replace(" ", "_") if isinstance(v, str) else v
+
 
 def _num(v):
     """An int, or a string like `0x10` / `16'h10` / `8` (what a spec or a model writes)."""
@@ -120,9 +137,11 @@ class CsrField(BaseModel):
     name: str = Field(description="field name (identifier); `reserved` for bits that do nothing")
     msb: int
     lsb: int
-    type: Literal["rw", "ro", "rwi", "w1c"] = Field(description=(
+    type: Literal["rw", "ro", "rwi", "w1c", "w0c", "w2c", "r2c", "wo"] = Field(description=(
         "rw: software read/write. ro: read-only, driven by hardware through a port (`reserved` reads 0). rwi: software read/write, hardware may "
-        "also write (software wins a same-cycle write). w1c: software writes 1 to clear, hardware may set"))
+        "also write (software wins a same-cycle write). w1c: software writes 1 to clear, hardware may set. Generator 2.2 or later: w0c (a written "
+        "0 clears the bit), w2c (any write to the register clears the field), r2c (a read returns the value and clears it); hardware loads win. "
+        "Generator 3.1 or later: wo (write-only: stored and seen by hardware, reads 0; hardware may clear it)"))
     reset: int = 0
     description: str = ""
 
@@ -142,13 +161,29 @@ class CsrMap(BaseModel):
     has_registers: bool = Field(True, description="false when the spec has no software-visible register map (nothing to generate)")
     module_name: str = Field("", description="name of the generated CSR module: the one the module map gives the register block, else <top>_csr")
     parent: str = Field("", description="the module that instantiates it (empty: the top)")
+    protocol: Literal["APB4", "AXI4-Lite", "AHB-Lite"] = Field("APB4", description=(
+        "the bus of the register block as the spec gives it: APB4 completer, AXI4-Lite subordinate or AHB-Lite subordinate (the last two need "
+        "the generator 3.0 or later)"))
     addr_width: int = 16
     data_width: int = 32
-    asynchronous: bool = Field(False, description="the registers live on a clock of their own, asynchronous to the APB clock")
+    asynchronous: bool = Field(False, description="the registers live on a clock of their own, asynchronous to the bus clock")
+    strobe_mode: Literal["HONOR", "REJECT"] = Field("HONOR", description=(
+        "AXI4-Lite / AHB-Lite writes narrower than the word (WSTRB not all ones, HSIZE byte / halfword): HONOR updates only the bytes written, "
+        "REJECT answers an error (SLVERR / ERROR) and changes nothing"))
+    outstanding: Literal["SINGLE", "READ_WRITE", "QUEUED"] = Field("SINGLE", description=(
+        "AXI4-Lite: requests accepted before their response: one in all (SINGLE), one read and one write (READ_WRITE), or up to rd_depth reads "
+        "and wr_depth writes (QUEUED)"))
+    rd_depth: int = Field(2, description="AXI4-Lite, QUEUED: outstanding reads, 1..8")
+    wr_depth: int = Field(2, description="AXI4-Lite, QUEUED: outstanding writes, 1..8")
+    ahb_endian: Literal["LITTLE", "BE8", "BE32"] = Field("LITTLE", description="AHB-Lite: byte-lane mapping of the bus")
     registers: list[CsrRegister] = Field(default_factory=list)
     req_ids: list[str] = Field(default_factory=list, description="the requirement ids the register map implements")
     summary: str = ""
     questions: list[Question] = Field(default_factory=list, description="only for what the spec leaves open about the registers")
+
+    _p = field_validator("protocol", mode="before")(_bus)
+    _u = field_validator("strobe_mode", "outstanding", "ahb_endian", mode="before")(_upper)
+    _d = field_validator("addr_width", "data_width", "rd_depth", "wr_depth", mode="before")(_num)
 
 
 # -- dv flow: the test programs of the `prepare` step ------------------------------------------------------------------

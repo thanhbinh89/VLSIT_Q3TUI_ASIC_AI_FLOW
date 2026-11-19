@@ -234,8 +234,8 @@ def test_a_child_module_named_like_this_projects_own_module_stops(tmp_path):
     with pytest.raises(children.ChildError) as e:
         children.copy(project, rtl, kids, {"m_cha_top"})
     assert str(e.value) == ("`m_cha_top` of the child project ../cha (../cha/src/rtl/m_cha_top.sv) is not the same file as this project's own "
-                            "src/rtl/m_cha_top.sv (made here by the csr step, with the APB-CSR-Generator): both projects must use the same "
-                            "APB-CSR-Generator version, or rename one of them")
+                            "src/rtl/m_cha_top.sv (made here by the csr step, with the CSR generator): both projects must use the same "
+                            "CSR generator version, or rename one of them")
     rtl.mkdir(parents=True)
     mine = "module m_cha_top (input logic i_clk);\nendmodule\n"
     (rtl / "m_cha_top.sv").write_text(mine)  # (this project's own file, not a copy)
@@ -254,7 +254,7 @@ CHS = "module m_cha_top (\n  input  logic i_clk,\n  input  logic i_d,\n  output 
 
 
 def test_the_generators_model_made_here_and_by_a_child_is_this_projects(tmp_path):
-    """Ruling 14 (I2): a unit this project makes itself (`own`: the csr step's, here the APB-CSR-Generator's synchronizer model, whose name is the
+    """Ruling 14 (I2): a unit this project makes itself (`own`: the csr step's, here the CSR generator's synchronizer model, whose name is the
     tool's) that a child provides with the very same bytes is no clash: the file stays this project's, neither copied nor recorded (the child's
     module that instantiates it still names it). So it goes for a copy recorded before this project made it (its async CSR turned on later): it
     leaves the registry, and its file stays."""
@@ -276,7 +276,7 @@ def test_the_generators_model_made_here_and_by_a_child_is_this_projects(tmp_path
 
 
 def test_the_generators_model_made_here_and_by_a_child_with_other_bytes_stops(tmp_path):
-    """Ruling 14 (I2): the same generator model with other bytes (another APB-CSR-Generator version) cannot be both: the copy stops naming both
+    """Ruling 14 (I2): the same generator model with other bytes (another CSR generator version) cannot be both: the copy stops naming both
     files, the model and what to do, before anything is written."""
     make_child(tmp_path, "cha", {"m_csr_sync.sv": SYNC.replace("assign o_q = i_d;", "always_ff @(posedge i_clk) o_q <= i_d;"), "m_cha_top.sv": CHA})
     par, project, rtl = _par(tmp_path)
@@ -285,8 +285,8 @@ def test_the_generators_model_made_here_and_by_a_child_with_other_bytes_stops(tm
     with pytest.raises(children.ChildError) as e:
         children.copy(project, rtl, children.resolve(par, ["../cha"]), {"m_csr_sync", "m_par_csr"})
     assert str(e.value) == ("`m_csr_sync` of the child project ../cha (../cha/src/rtl/m_csr_sync.sv) is not the same file as this project's own "
-                            "src/rtl/m_csr_sync.sv (the APB-CSR-Generator's synchronizer model, made here by the csr step): both projects must use "
-                            "the same APB-CSR-Generator version, or rename one of them")
+                            "src/rtl/m_csr_sync.sv (the CSR generator's model, made here by the csr step): both projects must use "
+                            "the same CSR generator version, or rename one of them")
     assert (rtl / "m_csr_sync.sv").read_text() == SYNC and not (rtl / "m_cha_top.sv").exists() and not children.registry_file(rtl).exists()
 
 
@@ -777,7 +777,7 @@ def test_a_middle_project_and_its_own_child_both_listed(tmp_path, tools_dir, llm
 
 
 def test_a_parent_with_its_own_async_csr_takes_a_child_with_the_same_model(tmp_path, tools_dir, llm):
-    """Ruling 14 (I2): this project's csr step made the synchronizer model a child has too, with the same bytes (the same APB-CSR-Generator
+    """Ruling 14 (I2): this project's csr step made the synchronizer model a child has too, with the same bytes (the same CSR generator
     version): the rtl step keeps this project's file (logged), copies the rest of the child, and the design has the model once."""
     make_child(tmp_path, "cha", {"m_csr_sync.sv": SYNC, "m_cha_top.sv": CHS})
     eng = make_parent(tmp_path, tools_dir, ["../cha"])

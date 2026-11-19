@@ -1,19 +1,23 @@
-"""Step `csr` of the RTL flow: the design's software-visible registers from the APB-CSR-Generator, not from hand-written RTL.
+"""Step `csr` of the RTL flow: the design's software-visible registers from the CSR generator (CSR-Generator, named APB-CSR-Generator before 3.0),
+not from hand-written RTL. The register block's bus is the map's `protocol`: APB4, or (generator 3.0 or later, FR-02) AXI4-Lite or AHB-Lite; the
+option `protocol` fixes it for the project.
 
-LLM (skills csr-register-map, apb-csr-tool; tool `csr_check`): drafts the register map from the spec into `src/rtl/csr/csr_map.json`. From then on the map
+LLM (skills csr-register-map, csr-tool; tool `csr_check`): drafts the register map from the spec into `src/rtl/csr/csr_map.json`. From then on the map
 is yours (edit it: the step generates from it again) and the LLM is asked only to update it when the spec changed. Code: the cheap first look (a spec
 that never says "register" needs no LLM), the checks the tool does not do (overlaps, duplicate / misaligned offsets, field widths, resets), `reserved`
 filler for uncovered bits, the Excel workbook in the layout the tool reads, running the tool through the role `csr_gen`, installing its result
-(`<rtl>/<module>.sv`, the CDC synchronizer when asynchronous) and declaring those files as *provided* (`src/rtl/csr/provided.json`): the `rtl` step
+(`<rtl>/<module>.sv` and the tool's models: every file its `filelist.f` lists from 3.0 — the synchronizer and, for AXI4-Lite / AHB-Lite, the
+request / response queues —, before 3.0 the CDC synchronizer when asynchronous) and declaring those files as *provided* (`src/rtl/csr/provided.json`): the `rtl` step
 instantiates them, never writes or rule-checks them, but fixes their lint findings in place; a file changed so is kept while the tool makes the same
 module (`step_meta.csr.generated`), and the changes are a patch (`src/rtl/csr/patches/<module>.patch`, why: `.md`; flows/rtl/lib/patches.py) applied
 again by code when the tool makes the module again; `format` and `style_lint` leave them alone. A file the tool makes that is a child project's
 read-only copy here (FR-01: the synchronizer model of a child's asynchronous CSR) is never overwritten with other bytes: the step stops naming the
-child project."""
+child project (FR-01: the generator's models of a child's CSR)."""
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -32,12 +36,12 @@ from q3tui.steps.common import Question, assign_question_ids, load_answers, spec
 from q3tui.flows.spec.lib import artifacts
 
 SYSTEM = skill_sections(Path(__file__).parent / "md" / "skill.md")["SYSTEM"]
-SKILLS = ["csr-register-map", "apb-csr-tool"]
+SKILLS = ["csr-register-map", "csr-tool"]
 
 
 class Step(RtlFlowStep):
     name = "csr"
-    title = "CSR (APB-CSR-Generator)"
+    title = "CSR (CSR-Generator)"
     deps = ("config",)
     tool_roles = ("csr_gen",)
 
@@ -75,6 +79,15 @@ class Step(RtlFlowStep):
         role = self.tools(engine).roles.get("csr_gen")
         return csr.find_tool(engine.project.root, self.options.get("tool_dir"), (role.env or {}).get("CSR_GEN_HOME") if role else None)
 
+    def fixed_protocol(self) -> str | None:
+        """The bus the project fixes for its register block (option `protocol`), in the map's spelling; None: the spec decides."""
+        from q3tui.flows.rtl.lib.models import _bus
+
+        v = _bus(self.options.get("protocol") or None)
+        if v is not None and v not in csr.PROTOCOLS:
+            raise StepFailed(f"option protocol of the csr step is `{v}`: one of {', '.join(csr.PROTOCOLS)}, or empty")
+        return v
+
     def _wants_tool(self, engine) -> bool:
         m = read_json(self._files(engine)["map"], None)
         return self.mode() == "on" or bool(m and m.get("has_registers", True) and m.get("registers"))
@@ -85,7 +98,7 @@ class Step(RtlFlowStep):
             return "the parsed spec and the configuration are needed first (steps parse and config)"
         if self.mode() != "off" and self._wants_tool(engine):
             if self.tool(engine) is None:
-                return ("the APB-CSR-Generator is not installed: `q3tui act csr_tool_install` clones " + csr.REPO + " (or set options.tool_dir, env.CSR_GEN_HOME of the csr_gen role in tools.json, or $CSR_GEN_HOME "
+                return ("the CSR generator is not installed: `q3tui act csr_tool_install` clones " + csr.REPO + " (or set options.tool_dir, env.CSR_GEN_HOME of the csr_gen role in tools.json, or $CSR_GEN_HOME "
                         "to its folder); mode: off skips this step")
             return self.tool_problem(engine, "csr_gen")
         return None
@@ -97,7 +110,8 @@ class Step(RtlFlowStep):
         spec = artifacts.read(p, "structured_spec.json") or {}
         return {"spec": {p.rel(f): sha256_file(f) for f in p.spec_documents()},
                 "modules": [{"name": m.get("name"), "description": m.get("description"), "reqs": m.get("req_ids")} for m in spec.get("modules") or [] if isinstance(m, dict)],
-                "top": (spec.get("metadata") or {}).get("top_module"), "answers": load_answers(self._q_paths(engine)[1])}
+                "top": (spec.get("metadata") or {}).get("top_module"), "answers": load_answers(self._q_paths(engine)[1]),
+                **({"protocol": self.fixed_protocol()} if self.fixed_protocol() else {})}  # (a bus the project fixes later: the map is updated)
 
     def _prompt(self, ctx: StepContext, snap: dict, current: CsrMap | None, changed: bool, problems: list[str], index: str) -> str:
         engine, project = ctx.engine, ctx.project
@@ -107,8 +121,14 @@ class Step(RtlFlowStep):
         reqs = "\n".join(f"- {r['req_id']}: {r.get('text', '')}" for r in spec.get("requirements", []) if r.get("req_id"))
         mods = "\n".join(f"- {m['name']}: {m.get('description') or ''} (REQ {', '.join(m.get('reqs') or [])})" for m in snap["modules"] if m.get("name"))
         params = "\n".join(f"- {k} = {(v or {}).get('value')}" for k, v in (config.get("parameters") or {}).items())
-        parts = ["# Task: give the register map of this design for the APB-CSR-Generator", "", "## Specification", block, "", "## Requirements", reqs or "(none)", "",
-                 f"## Module map of the design (top: {snap['top']})", mods or "(none: name the module `<top>_csr`)", "", "## Parameters", params or "(none)"]
+        ver = csr.version(self.tool(engine))
+        fixed = self.fixed_protocol()
+        bus = (f"The project fixes it: `protocol` is {fixed} (option protocol of the csr step); the spec's bus must be that one, ask if it is not."
+               if fixed else "Take it from the spec's interface section: `protocol` is APB4, AXI4-Lite or AHB-Lite.")
+        made = (f"The generator here is version {ver[0]}.{ver[1]}: it makes {', '.join(csr.protocols(ver))}." if ver else "")
+        parts = ["# Task: give the register map of this design for the CSR generator", "", "## Specification", block, "", "## Requirements", reqs or "(none)", "",
+                 f"## Module map of the design (top: {snap['top']})", mods or "(none: name the module `<top>_csr`)", "", "## Parameters", params or "(none)",
+                 "", "## The register block's bus", " ".join(x for x in (bus, made) if x)]
         if snap["answers"]:
             parts += ["", "## Your earlier answers (settled)", *[f"- {k}: {v}" for k, v in snap["answers"].items()]]
         if current is not None:
@@ -128,7 +148,7 @@ class Step(RtlFlowStep):
         problems: list[str] = []
         for attempt in range(3):
             stage = Stage(name="csr_map" if not attempt else "csr_map_fix", system_prompt=SYSTEM, prompt=self._prompt(ctx, snap, current, changed, problems, index),
-                          cwd=project.root, builtin_tools=["Read", "Grep", "Glob"], sdk_tools=csr_tools(ts, self.tool(engine), work), add_dirs=skillmod.add_dirs(skills),
+                          cwd=project.root, builtin_tools=["Read", "Grep", "Glob"], sdk_tools=csr_tools(ts, self.tool(engine), work, self.fixed_protocol()), add_dirs=skillmod.add_dirs(skills),
                           output_model=CsrMap, deny_dirs=[project.tb_dir, project.model_dir, project.build_dir, project.src_dir / "tb", project.src_dir / "sva", self.rtl_dir(engine)])
             m: CsrMap = (await ctx.llm(stage)).output
             if not m.has_registers:
@@ -136,7 +156,7 @@ class Step(RtlFlowStep):
             if not m.module_name:
                 m.module_name = f"{snap['top'] or 'design'}_csr"
             csr.complete(m)
-            problems = csr.validate(m)
+            problems = csr.validate(m, csr.version(self.tool(engine)), self.fixed_protocol())
             if not problems:
                 return m
         raise StepFailed("the register map has problems after 3 tries: " + "; ".join(problems[:6]) + f" (edit {engine.project.rel(self._files(engine)['map'])} and run again)")
@@ -178,7 +198,7 @@ class Step(RtlFlowStep):
             self._none(ctx, current.summary or "the spec has no software-visible registers")
             return
         csr.complete(current)
-        problems = csr.validate(current)
+        problems = csr.validate(current, csr.version(self.tool(engine)), self.fixed_protocol())
         if problems:  # (your edit of the map, or an old one): the tool would produce broken RTL silently
             raise StepFailed(f"{project.rel(f['map'])}: " + "; ".join(problems[:8]))
         await self._generate(ctx, current, snap)
@@ -201,7 +221,7 @@ class Step(RtlFlowStep):
         f, rtl = self._files(engine), self.rtl_dir(engine)
         tool = self.tool(engine)
         if tool is None:
-            raise StepFailed(self.missing_input(engine) or "the APB-CSR-Generator is not installed")
+            raise StepFailed(self.missing_input(engine) or "the CSR generator is not installed")
         ts, work = self.tools(engine), self.workdir(engine) / "gen"
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
@@ -210,17 +230,23 @@ class Step(RtlFlowStep):
         sv = work / "RTL" / f"{m.module_name}.sv"
         if not res.ok or not sv.is_file():
             tail = Path(res.log_path).read_text(errors="replace")[-1200:] if res.log_path else res.summary
-            raise StepFailed(f"the APB-CSR-Generator did not produce {m.module_name}.sv (see {project.rel(Path(res.log_path)) if res.log_path else 'its log'}):\n{tail}")
+            raise StepFailed(f"the CSR generator did not produce {m.module_name}.sv (see {project.rel(Path(res.log_path)) if res.log_path else 'its log'}):\n{tail}")
         top = m.parent or snap["top"] or ""
-        sync = csr.sync_model(work / "RTL") if m.asynchronous else None  # (its name depends on the tool's version)
-        if m.asynchronous and sync is None:
-            raise StepFailed(f"the APB-CSR-Generator made no synchronizer model for the asynchronous {m.module_name} (no {project.rel(work / 'RTL' / 'models')}/"
+        # the block and the tool's models (the synchronizer; from 3.0 every file of its filelist.f, the AXI4-Lite / AHB-Lite queues too)
+        made_now = csr.generated_files(work / "RTL", m.module_name, m.asynchronous)
+        absent = [p.name for p in made_now.values() if not p.is_file()]
+        if absent:
+            raise StepFailed(f"the CSR generator lists {', '.join(absent)} in {project.rel(work / 'RTL' / 'filelist.f')} but did not write it")
+        models = [n for n in made_now if n != m.module_name]
+        if m.asynchronous and not any(n in csr.SYNC_MODELS for n in models):
+            raise StepFailed(f"the CSR generator made no synchronizer model for the asynchronous {m.module_name} (no {project.rel(work / 'RTL' / 'models')}/"
                              + " or ".join(f"{s}.sv" for s in csr.SYNC_MODELS) + ")")
-        files: dict[str, str] = {m.module_name: self._with_header(sv.read_text(), m)}
-        provided = {m.module_name: {"kind": "csr", "parent": top, "req_ids": m.req_ids, "instances": [sync] if sync else []}}
-        if sync:
-            files[sync] = (work / "RTL" / "models" / f"{sync}.sv").read_text()
-            provided[sync] = {"kind": "model", "parent": m.module_name, "req_ids": [], "instances": []}
+        block = self._with_header(made_now[m.module_name].read_text(), m)
+        files: dict[str, str] = {m.module_name: block, **{n: made_now[n].read_text() for n in models}}
+        used = [n for n in models if re.search(rf"\b{n}\b", block)]  # (the models the block instantiates, a generate branch's included)
+        provided = {m.module_name: {"kind": "csr", "parent": top, "req_ids": m.req_ids, "instances": used}}
+        for n in models:
+            provided[n] = {"kind": "model", "parent": m.module_name, "req_ids": [], "instances": [x for x in models if x != n and re.search(rf"\b{x}\b", files[n])]}
         self._spare_child_copies(project, rtl, files)
         rtl.mkdir(parents=True, exist_ok=True)
         written, dropped, refixed, reapplied = [], [], [], []
@@ -269,7 +295,9 @@ class Step(RtlFlowStep):
         shutil.copy2(wb, f["workbook"])
         if (work / "Debug" / "debug.json").is_file():
             shutil.copy2(work / "Debug" / "debug.json", f["debug"])
-        write_json(f["report"], {"module": m.module_name, "parent": top, "asynchronous": m.asynchronous, "registers": [r.name for r in m.registers],
+        ver = csr.version(tool)
+        write_json(f["report"], {"module": m.module_name, "parent": top, "protocol": m.protocol, "asynchronous": m.asynchronous,
+                                 "generator": f"{ver[0]}.{ver[1]}" if ver else "", "registers": [r.name for r in m.registers],
                                  "fields": sum(len(r.fields) for r in m.registers), "files": sorted(files), "tool": str(tool),
                                  "ports": csr.port_summary(files[m.module_name], m.module_name), "req_ids": m.req_ids})
         ctx.emit("log", message=f"csr: {m.module_name} generated from {len(m.registers)} register(s)" + (f" ({', '.join(written)} written)" if written else " (unchanged)")
@@ -283,15 +311,15 @@ class Step(RtlFlowStep):
                 from q3tui.steps.common import scoped
 
                 engine.request_change("rtl", scoped("rtl", name, (
-                    f"The APB-CSR-Generator made {name} again (the register map changed) and these changes made to it before no longer fit; make them again "
+                    f"The CSR generator made {name} again (the register map changed) and these changes made to it before no longer fit; make them again "
                     f"in the new file ({project.rel(patches.notes_path(rtl, name))} says why each was made):\n" + "\n".join(failed))))
                 ctx.emit("warning", message=f"csr: {len(failed)} change(s) of {name} no longer fit the new module: handed to the rtl step")
         ctx.unchanged = not written and not dropped
 
     @staticmethod
     def _spare_child_copies(project, rtl: Path, files: dict[str, str]) -> None:
-        """FR-01 (Ruling 14): a unit the tool makes that is a child project's copy here (`child/provided.json`; this project's asynchronous CSR
-        turned on after the copy, and the synchronizer model has the tool's name) is read-only here. Where the tool's file differs from the copy
+        """FR-01 (Ruling 14): a unit the tool makes that is a child project's copy here (`child/provided.json`; this project's CSR turned on after
+        the copy, and the tool's models — the synchronizer, the AXI4-Lite / AHB-Lite queues — have the tool's names) is read-only here. Where the tool's file differs from the copy
         (as the loop below decides that a file changed), the step stops naming the child project, before anything is written, instead of
         overwriting the copy; the same file is fine (the rtl step's copy then keeps it as this project's). Nothing without child projects."""
         try:
@@ -304,11 +332,11 @@ class Step(RtlFlowStep):
             copy = rtl / f if isinstance(f, str) and f and f == Path(f).name else None  # (a plain name: never outside the folder)
             if copy is not None and copy.is_file() and csr.stable(copy.read_text(errors="replace")) != csr.stable(text):
                 owner = e.get("owner") or e.get("child") or "?"
-                raise StepFailed(f"csr: the APB-CSR-Generator makes `{name}`, which the child project {owner} provides here with other bytes "
+                raise StepFailed(f"csr: the CSR generator makes `{name}`, which the child project {owner} provides here with other bytes "
                                  f"({project.rel(copy)}, a copy of {e.get('source') or '?'}): the copy is not overwritten — both projects must use "
-                                 "the same APB-CSR-Generator version, or rename one of them")
+                                 "the same CSR generator version, or rename one of them")
 
     def _with_header(self, text: str, m: CsrMap) -> str:
-        lines = ["// Generated by the APB-CSR-Generator from src/rtl/csr/csr_map.json (Q3TUI step csr): do not edit; change the map or the spec.",
+        lines = ["// Generated by the CSR-Generator from src/rtl/csr/csr_map.json (Q3TUI step csr): do not edit; change the map or the spec.",
                  *([f"// REQ-IDs: {', '.join(m.req_ids)}"] if m.req_ids else [])]
         return "\n".join(lines) + "\n" + text + ("" if text.endswith("\n") else "\n")  # (the tool ends without a newline: EOFNEWLINE)

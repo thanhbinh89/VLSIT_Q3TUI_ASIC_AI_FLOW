@@ -14,7 +14,7 @@ spec ─► rules ─► parse ─► config ─► csr ─► rtl ─► format
 |---|---|---|
 | spec, parse, config | `spec`, `vlsit_parse`, `vlsit_config` | The spec flow's steps as they are (`rules` is setup: it needs none of their results, so it runs right after `spec` and fails fast on contradicting rules) ([spec-flow.md](spec-flow.md)): requirements `REQ-NNN`, parameters, module map, questions |
 | rules | `rtl.rules` | Reads the rule stack, checks it for contradictions **before any RTL is written**, writes the Verible flags (`src/rtl/style_lint/verible.flags`, `format.flags`) |
-| csr | `rtl.csr` | The software-visible registers from the APB-CSR-Generator (see "CSR"): register map drafted from the spec, checked, generated, provided to `rtl` |
+| csr | `rtl.csr` | The software-visible registers from the CSR generator (see "CSR"): register map drafted from the spec, checked, generated, provided to `rtl` |
 | rtl | `rtl.rtl` (generator base in `flows/rtl/rtl/gen.py`, rule files in `flows/rtl/rtl/rules/`: `rtl_rule.md`, `rtl_rule_default.md`) | RTL per module into `src/rtl/` (`project.rtl_dir`, `options.rtl_dir`), rule check by code, lint (role `lint`), synthesis, update-not-re-run. Follows the rule stack |
 | format | `rtl.format` | `verible-verilog-format` with `format.flags`. Code only |
 | style_lint | `rtl.style_lint` | Verible lint with `verible.flags`, judged by an LLM; fixes go back to their owners |
@@ -36,7 +36,7 @@ description alone is not a change (the hash ignores it), so a spec update that m
 ├── spec/                       spec.md (input)
 ├── config/rtl_rules.md         YOUR rules (optional; `q3tui act rtl_rules_init` writes a skeleton)
 ├── config/skills/<name>/SKILL.md   YOUR skills (optional): replace or add a playbook the LLM stages may read
-├── src/rtl/                    RTL (+ filelist.f, synth scripts of the rtl step) and the generated CSR module (+ its CDC synchronizer)
+├── src/rtl/                    RTL (+ filelist.f, synth scripts of the rtl step) and the generated CSR module (+ the tool's models)
 │   ├── child/                  provided.json (the registry of the child projects' files copied into src/rtl; code writes it)
 │   ├── csr/                    csr_map.json (the register map: yours after the first draft), csr.xlsx, debug.json, provided.json, csr_report.json
 │   ├── style_lint/             verible.flags, format.flags, rules_resolved.md, rules_check.json, format.json, style_report.json
@@ -51,23 +51,36 @@ The generator's folder is `project.rtl_dir` (default `src/rtl/`; `options.rtl_di
 
 ## CSR (the registers are generated, not written)
 
-[APB-CSR-Generator](https://github.com/nguyenquanicd/APB-CSR-Generator) turns an Excel register map into an APB4 slave (address decode, SLVERR / PREADY,
-`rw` / `ro` / `rwi` / `w1c` fields, an optional clock-domain-crossing bridge). Q3TUI drives it; it is not shipped:
-`q3tui act csr_tool_install` clones it to `~/.q3tui/tools/APB-CSR-Generator`; also found by `options.tool_dir`, `env.CSR_GEN_HOME` of the `csr_gen` role in `config/tools.json` (no shell export needed), `$CSR_GEN_HOME`, `<project>/tools/…`. Role `csr_gen`
-(`{python} {tool}/CSR_Generation.py {workbook} {sheet}`, Q3TUI's interpreter: it has `openpyxl`). Both versions of the tool work. Version 2.0
+The [CSR generator](https://github.com/nguyenquanicd/CSR-Generator) (CSR-Generator; APB-CSR-Generator before 3.0) turns an Excel register map into one
+register block on a bus (address decode, the bus's handshake and error responses, `rw` / `ro` / `rwi` / `w1c` fields, `w0c` / `w2c` / `r2c` from 2.2, `wo`
+from 3.1, an optional clock-domain-crossing bridge). The bus is APB4 up to 2.x; from 3.0 it is the map's `protocol`: APB4 completer, AXI4-Lite or AHB-Lite
+subordinate (FR-02, below). Q3TUI drives it; it is not shipped:
+`q3tui act csr_tool_install` clones it to `~/.q3tui/tools/CSR-Generator`; also found by `options.tool_dir`, `env.CSR_GEN_HOME` of the `csr_gen` role in `config/tools.json` (no shell export needed), `$CSR_GEN_HOME`, `~/.q3tui/tools/APB-CSR-Generator` (the clone's name before 3.0), `<project>/tools/…`. Role `csr_gen`
+(`{python} {tool}/CSR_Generation.py {workbook} {sheet}`, Q3TUI's interpreter: it has `openpyxl`; 3.5 also takes `--vlsit-style`). Every version of the tool works. Version 2.0
 (2026-10-28) renamed the bus, clock and reset ports (`i_clk_apb`, `i_apb_psel`, `o_apb_prdata`… instead of `i_bus_clk`, `i_psel`, `o_prdata`…), the
 synchronizer model (`m_csr_sync` instead of `m_vlsi_synch`) and the header (` * Author :` / ` * Date :` lines). Q3TUI reads the ports from the generated
 file, takes whichever synchronizer model the tool wrote and ignores either header's per-run lines. A module made by the older version keeps its names until
 the map changes. The next generation then renames its ports, and the `rtl` step updates the parent that instantiates it.
 
+**Version 3.x and the bus (FR-02).** Version 3.0 keeps no `models/` folder in the tool (it writes the models per run), so the tool is recognised by its
+`CSR_Protocol_Generation.py`; its version is read from `VERSION` in `CSR_Generation.py` (`csr_report.json` `generator`). The map says the bus
+(`protocol`: `APB4`, `AXI4-Lite`, `AHB-Lite`) and its options (`strobe_mode`; AXI4-Lite `outstanding`, `rd_depth`, `wr_depth`; AHB-Lite `ahb_endian`), which
+go into the workbook's configuration block (`Protocol` stays `APB` for APB4, the value every version reads). The step option `protocol` fixes the bus for the
+whole project: the prompt says so, and a map on another bus is a problem (back to the LLM; your edited map stops the step). A bus or a field type the installed
+generator does not make (AXI4-Lite with a 2.x tool, `wo` before 3.1) is a problem too, before the tool runs: a 2.x tool would make an APB4 block silently.
+Version 3.x lists what it wrote in `RTL/filelist.f`: the block, `m_csr_sync` and, for AXI4-Lite / AHB-Lite, the request / response queues `m_csr_sync_fifo`
+and `m_csr_async_fifo`; the step installs and provides them all (one RTL source holds both clock architectures, chosen by `PARA_ASYNCHRONOUS`, so a model of
+the other architecture is in the filelist but not elaborated). The port list is read with comments removed (3.x writes `);` inside a parameter comment).
+
 `csr` (mode `auto`: only when the spec says register / CSR / SFR / memory-mapped, else no LLM and nothing generated; `on` always; `off` never):
 
-1. **LLM, skills `csr-register-map` and `apb-csr-tool`, tool `csr_check`**: drafts the register map from the spec (module name from the module map, registers,
-   offsets, fields, access types, resets, asynchronous or not, the REQs). `csr_check` validates a map and, with the generator installed, really generates it in
+1. **LLM, skills `csr-register-map` and `csr-tool`, tool `csr_check`**: drafts the register map from the spec (module name from the module map, the bus and
+   its options, registers, offsets, fields, access types, resets, asynchronous or not, the REQs). `csr_check` validates a map and, with the generator installed, really generates it in
    a scratch folder and lists the ports it will have. Questions (`spec_gap`) for what the spec leaves open.
 2. **Code**: `reserved` filler for uncovered bits, the checks the tool does not do (duplicate / misaligned offsets, overlapping or out-of-range fields, a reset
-   too wide, identifiers, 32-bit data only; a map with problems goes back to the LLM, 3 tries), the workbook in the layout the tool reads, running the tool, and
-   installing `src/rtl/<module>.sv` (+ `src/rtl/m_vlsi_synch.sv` when asynchronous) after `project.backup()`. The tool's header (user, time) is not a change.
+   too wide, identifiers, 32-bit data only, a bus or type the generator does not make, a bus other than the project's; a map with problems goes back to the
+   LLM, 3 tries), the workbook in the layout the tool reads, running the tool, and installing `src/rtl/<module>.sv` and the tool's models (every file of its
+   `filelist.f` from 3.0; before, the synchronizer when asynchronous) after `project.backup()`. The tool's header (user, time) is not a change.
    `src/rtl/csr/provided.json` declares them *provided*.
 3. **`src/rtl/csr/csr_map.json` is yours after the first draft** (like `sdc.json`): edit it and the step generates again with no LLM; the LLM is asked only when the spec
    changed (it gets the current map and the changes, and keeps your edits).
@@ -99,9 +112,9 @@ so it does for a child that is this project or lists it (a cycle). The `parse` s
 
 **The copy** (start of the `rtl` step, code): only the files the child's `filelist.f` lists, byte for byte, flat into this project's RTL folder. The parent's filelist lists files only: a line
 starting with `+` or `-`, a missing file or a suffix other than `.sv` / `.v` stops the step. Each file must hold exactly the one unit (module / package / interface) it is named after. The same unit
-with identical bytes in two children is copied once; different bytes stop the step naming both sources. A unit this project's csr step makes too (the APB-CSR-Generator's synchronizer model has the tool's
-name, so a parent and a child with an asynchronous CSR both have it) stays this project's file when the child's has the very same bytes: neither copied nor recorded (log "`m_csr_sync`: the same file as this
-project's own (csr step): kept as this project's"); other bytes stop the step naming both files ("both projects must use the same APB-CSR-Generator version, or rename one of them"), and the csr step never
+with identical bytes in two children is copied once; different bytes stop the step naming both sources. A unit this project's csr step makes too (the CSR generator's models have the tool's
+names, so a parent and a child with a CSR both have them) stays this project's file when the child's has the very same bytes: neither copied nor recorded (log "`m_csr_sync`: the same file as this
+project's own (csr step): kept as this project's"); other bytes stop the step naming both files ("both projects must use the same CSR generator version, or rename one of them"), and the csr step never
 overwrites a recorded copy with other content (it stops naming the child project). A file here named like a child unit that is not a recorded copy (and differs) stops it too: "`<file>` is not a recorded
 copy of <child>: if it is an earlier copy, delete it (it is copied again); else rename one of them"; one with the child's very bytes is taken as the copy. A child that is itself a parent
 contributes every file of its filelist; the owner of what it got from its own children comes from its registry (a middle project's copy that differs from the owner's file is a warning: run that project's rtl flow first).
@@ -195,7 +208,7 @@ names them (`needs your decision on SM1, …`); `auto_answer` does not approve t
 A skill is `<name>/SKILL.md` (front matter `name`, `description`; the body is the playbook). The stage's prompt lists them with one line each; the LLM
 reads the ones the task needs and decides how to use them. Q3TUI scripts nothing inside a skill: it gives tools, confines files and checks the
 result by code. Search order, first wins per name: `<project>/config/skills/`, `~/.q3tui/skills/`, the flow folder's `skills/`, the built-in
-`flows/rtl/skills/`: so a project replaces or adds a playbook by dropping a folder. Built-in: `csr-register-map`, `apb-csr-tool`, `verible-flags`, `rule-consistency`,
+`flows/rtl/skills/`: so a project replaces or adds a playbook by dropping a folder. Built-in: `csr-register-map`, `csr-tool`, `verible-flags`, `rule-consistency`,
 `lint-triage`, `smoke-testbench`, `smoke-triage`. Skills are not part of a step's staleness (like prompts, they apply to the next LLM task).
 
 ## Tools (`config/tools.json`, by role)
@@ -220,7 +233,7 @@ Settings (Settings dialog → step tabs): `rtl.keep_generated`, `csr.mode`, `csr
 
 ## Known issues
 
-- **KI-1: the generated CSR module is an exception to the VLSIT RTL Design Rules (REF-003).** The APB-CSR-Generator's module has its own port names
+- **KI-1: the generated CSR module is an exception to the VLSIT RTL Design Rules (REF-003).** The CSR generator's module (1.x shown here) has its own port names
   (`i_bus_clk`, `i_bus_rstn`, `i_reg_clk`, not `i_clk_<domain>` / `i_rst_n_<domain>`), untyped `input` / `output` declarations, `localparam PARA_*_OFFSET`
   and a placeholder CDC synchronizer (`m_vlsi_synch`). It is treated as *provided*: not rule-checked, its lint findings fixed in place (or only reported with `keep_generated`), `format` / `style_lint` skip it.
   Modules of child projects (below) are exempt in the same way; unlike the CSR module they are never edited, whatever `keep_generated` says.
@@ -228,7 +241,7 @@ Settings (Settings dialog → step tabs): `rtl.keep_generated`, `csr.mode`, `csr
   it as a decision in section 20 of the spec.
 - **KI-2 (resolved): the RTL goes to `src/rtl/`, the folder every flow reads.** The generator writes `project.rtl_dir` (default `src/rtl/`), the same folder `fpga`, `asic` and `sanity` read; the working folders `csr/`, `style_lint/` and `smoke/` still live inside it, so they are in the RTL folder, not in `build/`.
 - **KI-3: pending change in the CSR source (decided, not implemented).** The `csr` step still drafts the register map from the spec text with an LLM. The decision
-  is: **one source of truth, the CSR workbook** (the spec holds only a pointer to it, as the VLSIT spec template requires), in the **APB-CSR-Generator's workbook
+  is: **one source of truth, the CSR workbook** (the spec holds only a pointer to it, as the VLSIT spec template requires), in the **CSR generator's workbook
   layout**; no register is read from the spec text. The tool makes one module per sheet per run (the example workbook has two sheets, two modules): the spec says which
   sheets / modules there are and the step only generates (one run per sheet, in its own work folder); the module name of a sheet must match the module map of `parse`
   (a mismatch is handed back to `parse` as a non-blocking decision whose default is the workbook's name); the requirements of the CSR module come from `parse`'s module map; whoever may read the spec may read the workbook (the smoke writer included).
@@ -244,7 +257,8 @@ Settings (Settings dialog → step tabs): `rtl.keep_generated`, `csr.mode`, `csr
   add-only (an override becomes an error) or keep the override.
 - **KI-6: the smoke test does not use the spec's test plan.** The spec has a requirement-based test plan (section 15.2, `TEST-xxx` with requirements and expected results). The smoke
   writer invents its own 3–6 behaviours (`S1…S6`) from the spec and the requirements, so they carry no `TEST-xxx` id. Better: pick the smoke subset of that plan and cite its ids.
-- **KI-7: the generator's limits are not checked against the spec.** The APB-CSR-Generator does APB only, 32-bit data, full-strobe writes, `PPROT[1]` only. The spec says what the
+- **KI-7: the generator's limits are not checked against the spec.** The CSR generator does 32-bit data; up to 2.x APB only, full-strobe writes, `PPROT[1]` only;
+  from 3.0 AXI4-Lite (DECERR for an unmapped address, `AxPROT` ignored) and AHB-Lite (no `HPROT`), byte writes per `strobe_mode` (FR-02). The spec says what the
   template cannot express must be recorded as a decision in section 20; the flow does not compare the spec's requirements with these limits (a spec asking for byte-masked writes
   gets a module that rejects them with SLVERR, silently).
 - **KI-8: the lint configuration is not in the spec.** The spec's RTL contract (section 14.3) lists the lint rule configuration; the Verible flags of this flow live in

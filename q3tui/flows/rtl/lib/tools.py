@@ -109,7 +109,7 @@ def smoke_tools(ts, project_root: Path, work: Path, rtl_files, tb: Path) -> list
     return [compile_tool, run_tool, tools_tool(ts, ["sim", "run"])]
 
 
-def csr_tools(ts, tool: Path | None, work: Path) -> list:
+def csr_tools(ts, tool: Path | None, work: Path, protocol: str | None = None) -> list:
     """`csr_check`: validate a register map and, when the generator is installed, really generate it in a scratch folder and report the ports of the
     module it makes (the exact names the integrator will connect to)."""
     import shutil
@@ -120,8 +120,10 @@ def csr_tools(ts, tool: Path | None, work: Path) -> list:
     from q3tui.flows.rtl.lib.models import CsrMap
 
     @sdk_tool("csr_check", "Check a register map (the structure of the answer you will give): the problems of the map (overlapping fields, duplicate or misaligned "
-                           "offsets, …) or, when it is sound, the ports of the module the APB-CSR-Generator makes from it. Fix every problem before you answer.",
-              {"type": "object", "properties": {"map": {"type": "object", "description": "module_name, addr_width, asynchronous, registers[{name, offset, fields[{name, msb, lsb, type, reset}]}]"}},
+                           "offsets, a bus or a field type the installed generator does not make, …) or, when it is sound, the ports of the module the CSR "
+                           "generator makes from it. Fix every problem before you answer.",
+              {"type": "object", "properties": {"map": {"type": "object", "description": "module_name, protocol, addr_width, asynchronous, strobe_mode, outstanding, "
+                                                                                          "rd_depth, wr_depth, ahb_endian, registers[{name, offset, fields[{name, msb, lsb, type, reset}]}]"}},
                "required": ["map"]})
     async def check_tool(args: dict) -> dict:
         try:
@@ -129,7 +131,7 @@ def csr_tools(ts, tool: Path | None, work: Path) -> list:
         except Exception as exc:  # noqa: BLE001 - what the LLM got wrong in the shape
             return _text("the map is not in the expected structure:\n" + str(exc)[:1500])
         csr.complete(m)
-        problems = csr.validate(m)
+        problems = csr.validate(m, csr.version(tool), protocol)
         if problems:
             return _text("problems:\n" + "\n".join(f"- {p}" for p in problems))
         if tool is None:

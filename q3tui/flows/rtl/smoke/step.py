@@ -118,7 +118,7 @@ class Step(RtlFlowStep):
         engine, project = ctx.engine, ctx.project
         f = self._files(engine)
         ts, work = self.tools(engine), self.workdir(engine)
-        skills = skillmod.discover(project.config_dir, engine.flow.path, ["smoke-testbench", *(["apb-csr-tool"] if csr.read_provided(self.rtl_dir(engine)) else [])])
+        skills = skillmod.discover(project.config_dir, engine.flow.path, ["smoke-testbench", *(["csr-tool"] if csr.read_provided(self.rtl_dir(engine)) else [])])
         f["tb"].parent.mkdir(parents=True, exist_ok=True)
         stage = Stage(name="smoke_tb", system_prompt=WRITER, prompt=self._writer_prompt(engine, snap, f["tb"], old, feedback, skillmod.index(skills, project.root)),
                       cwd=project.root, builtin_tools=["Read", "Grep", "Glob", "Write", "Edit"],

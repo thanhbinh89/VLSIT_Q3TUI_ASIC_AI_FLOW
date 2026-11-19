@@ -133,7 +133,7 @@ pipeline:
 | Tool | How it is found |
 |---|---|
 | RISC-V GCC, Spike (dv `prepare`) | the roles `riscv_gcc` / `iss` if set, else `$RISCV/bin`, PATH, then `~/.q3tui/tools/{riscv-gcc,spike,dtc}/bin` |
-| APB-CSR-Generator (rtl `csr`) | `csr.tool_dir`, `env.CSR_GEN_HOME` of the `csr_gen` role, `$CSR_GEN_HOME`, `~/.q3tui/tools/APB-CSR-Generator` (`q3tui act csr_tool_install` clones it) |
+| CSR generator, CSR-Generator (rtl `csr`) | `csr.tool_dir`, `env.CSR_GEN_HOME` of the `csr_gen` role, `$CSR_GEN_HOME`, `~/.q3tui/tools/CSR-Generator` (or `APB-CSR-Generator`) (`q3tui act csr_tool_install` clones it) |
 | Verible (rtl `format`, `style_lint`) | `verible-verilog-format` / `verible-verilog-lint` on PATH, or the full path in the roles `verible_format` / `verible_lint` |
 
 #### Check it
@@ -459,7 +459,7 @@ spec → parse → config → rules → csr → rtl → format → style_lint �
 
 1. **Your rules.** `q3tui act rtl_rules_init` writes `config/rtl_rules.md`: one rule per bullet, `- **ID** text`. They are read before Q3TUI's default rules (same id =
    override). The `rules` step checks them for contradictions (it stops with the exact text to change) and writes the Verible flags to `src/rtl/style_lint/`.
-2. **Registers.** If the spec has a register map, the `csr` step drafts `src/rtl/csr/csr_map.json` and generates the register block with the APB-CSR-Generator
+2. **Registers.** If the spec has a register map, the `csr` step drafts `src/rtl/csr/csr_map.json` and generates the register block (APB4; AXI4-Lite or AHB-Lite with generator 3.0+, option `csr.protocol`) with the CSR generator
    (`q3tui act csr_tool_install` once; or set `csr.tool_dir`, `env.CSR_GEN_HOME` of the `csr_gen` role in `config/tools.json`, or `$CSR_GEN_HOME`). Edit `csr_map.json` to change a register: it is yours after the first draft. `csr.mode: off` skips it.
 3. **RTL, format, style lint.** `rtl` follows the rules; `format` only changes whitespace (it asks before touching a file you edited); `style_lint` runs Verible and sends
    violations back to `rtl`. This repeats by itself, up to `style_lint.max_rounds`.
@@ -484,7 +484,7 @@ pipeline:
 Each child needs its own `q3tui.yaml` and a `filelist.f` in its RTL folder (run its rtl flow first). `q3tui --flow rtl run` in the parent copies the files the children's
 filelists list into `src/rtl/` byte for byte, writes only the parent's own modules (`m_par_top` instantiates the children's tops) and puts the children first in `filelist.f`.
 The child modules are not rule-checked, style-linted or edited. A parent and a child that both have an asynchronous CSR both have the generator's synchronizer model
-(`m_csr_sync`): made by the same APB-CSR-Generator version it is the same file, and the parent keeps its own; otherwise the rtl (or csr) step stops and says so.
+(`m_csr_sync`): made by the same CSR generator version it is the same file, and the parent keeps its own; otherwise the rtl (or csr) step stops and says so.
 
 What you see: a warning per child that has not passed its own rtl flow (or changed since); `src/rtl/child/provided.json` (code writes it: unit, owner, source file, sha256);
 a hand edit of a copy is restored with a warning; lint findings in a child file are warnings that name the child. Editing a file in a child makes the parent's rtl step stale, and the
