@@ -77,6 +77,9 @@ placement: these are post-synthesis numbers, and power has no switching activity
 ## Equivalence (`asic_lec`)
 
 Formality reads the RTL as the reference and the netlist (with the library) as the implementation, sets the SVF, runs `match` and `verify`.
+`options`: `pre_tcl` (lines before the designs are read: `hdlin_*` variables, e.g. `set_app_var hdlin_interface_only "m_sram"` with
+`set_app_var hdlin_unresolved_modules black_box` when `asic_synth`'s `extra_tcl` kept a memory wrapper as a black box), `extra_tcl` (lines
+before `match`), `defines`, `message_filter`.
 Equivalent → done. Not equivalent, inconclusive or no verdict is a failed step, never waived (the failing points are in
 `build/syn/asic/reports/lec.rpt`). When Formality refuses to link the RTL on an interpretation message (for example `FMR_ELAB-147`, an index that
 may leave an array), the step names the message: fix the RTL, or accept it with `options.message_filter: [FMR_ELAB-147]`.

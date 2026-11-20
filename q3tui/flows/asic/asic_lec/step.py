@@ -21,7 +21,7 @@ class Step(AsicStep):
     title = "Logic equivalence check"
     deps = ("asic_synth",)
     tool_roles = ("asic_lec",)
-    hashed_options = ("message_filter", "extra_tcl", "defines")  # (staleness: these change the result)
+    hashed_options = ("message_filter", "pre_tcl", "extra_tcl", "defines")  # (staleness: these change the result)
 
     def inputs(self, engine) -> list[Path]:
         net = self.netlist(engine)

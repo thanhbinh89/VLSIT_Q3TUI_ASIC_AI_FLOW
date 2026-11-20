@@ -195,6 +195,9 @@ def test_the_formality_script(tmp_path):
     t = fm.script_text([Path("/r/a.sv")], "blk", ["/l/x.db"], Path("/n/blk.v"), svf, tmp_path)
     assert t.index("set_svf") < t.index("read_sverilog") < t.index("set_top r:/WORK/blk") < t.index("read_verilog -container i -netlist") < t.index("match") < t.index("verify")
     assert "set_top i:/WORK/blk" in t and "Q3TUI_LEC_RESULT" in t
+    t = fm.script_text([Path("/r/a.sv")], "blk", ["/l/x.db"], Path("/n/blk.v"), svf, tmp_path,
+                       {"pre_tcl": ['set_app_var hdlin_interface_only "m_sram"'], "extra_tcl": ["set_constant i:/WORK/blk/t 0"]})
+    assert t.index("sh_continue_on_error") < t.index("hdlin_interface_only") < t.index("read_db") < t.index("set_constant") < t.index("match")
 
 
 def test_formality_results():
