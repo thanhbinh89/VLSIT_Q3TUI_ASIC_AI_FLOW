@@ -118,6 +118,45 @@ def parse_report(text: str) -> tuple[list[dict], int]:
     return out, infos
 
 
+_WAIVE_WARNING = re.compile(r"^(\S+?):(\d+): \[(?:Warning|Error)\] (\w*WAIVE\w*): (.*?)\s*$")
+
+
+def parse_not_applied(text: str) -> list[dict]:
+    """The waivers `waive_cdc -not_applied` / `waive_rdc -not_applied` lists (its "Waiver Summary": `Waiver : W_V3`, `Filename`, `Line`,
+    `Violations : 0`, then what it selects): `{waiver, file, line, violations, select}` for each one that matched no violation."""
+    out: list[dict] = []
+    cur: dict | None = None
+    for line in text.splitlines():
+        f = _FIELD.match(line)
+        if not f:
+            continue
+        name, value = f.group(1), f.group(2)
+        if name == "Waiver":
+            cur = {"waiver": value, "file": "", "line": 0, "violations": 0, "select": {}}
+            out.append(cur)
+        elif cur is None:
+            continue
+        elif name == "Filename":
+            cur["file"] = value
+        elif name == "Line" and value.isdigit():
+            cur["line"] = int(value)
+        elif name == "Violations" and value.isdigit():
+            cur["violations"] = int(value)
+        elif name not in ("Comment",) and value:
+            cur["select"][name] = value
+    return [w for w in out if w["violations"] == 0]
+
+
+def waive_warnings(log: str, waive_file: str) -> dict[int, str]:
+    """{line of the waiver file: what the tool said about the waiver there} (`…/cdc_waive.tcl:27: [Warning] CDC_WAIVE_OPTION_INVALID: …`)."""
+    out: dict[int, str] = {}
+    for line in log.splitlines():
+        m = _WAIVE_WARNING.match(line.strip())
+        if m and m.group(1).rsplit("/", 1)[-1] == waive_file:
+            out.setdefault(int(m.group(2)), f"{m.group(3)}: {m.group(4)}")
+    return out
+
+
 def clear_stale_lock(work: Path) -> str | None:
     """VC Static refuses to start while `vcst_rtdb/session.lock` names a session ("Another session is already running…"): a run that crashed leaves it
     (rv32iv_sm: the RDC check after a segfault). When the process it names is not running on this host, the lock is stale: it is removed and the

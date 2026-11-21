@@ -23,6 +23,8 @@ REPORTS = {
     "rdc": "report_rdc -list -limit 0 -include_compressed -no_summary -hide_id -file {work}/rdc_violations.rpt",
 }
 CONFIG = {"rdc": "configure_rdc_corrupt -report_rdc_on_cdc true\n"}  # (the tool: RDC on asynchronous paths is off by default)
+# after the waivers: the ones that matched no violation (`waive_<role> -not_applied`: a "Waiver Summary", vcstatic.parse_not_applied)
+NOT_APPLIED = "catch {{redirect -file {work}/{role}_not_applied.rpt {{waive_{role} -not_applied}}}}\n"
 _LOW = re.compile(r"(^|_)(n|b)$|rst_?n|resetn|^n_", re.I)
 
 
@@ -83,4 +85,5 @@ def text(role: str, top: str, root: Path, filelist: Path, work: Path, sdc: Path,
     `resets`: the `create_reset` lines of the setup step (None: from the SDC's resets); `setup`: the setup step's other commands (lib/setup.py)."""
     return SETUP.format(role=role, work=work, filelist=filelist, top=top, sdc=sdc, groups=group_lines(sdcj), blackbox=blackbox_lines(blackbox),
                         resets=resets if resets is not None else reset_lines(list(sdcj.get("resets") or [])), setup=setup, extra=(extra.rstrip() + "\n") if extra.strip() else "",
-                        config=CONFIG.get(role, ""), waive=f"source {waive}\n" if waive else "", reports=REPORTS[role].format(work=work))
+                        config=CONFIG.get(role, ""), waive=f"source {waive}\n" + NOT_APPLIED.format(work=work, role=role) if waive else "",
+                        reports=REPORTS[role].format(work=work))

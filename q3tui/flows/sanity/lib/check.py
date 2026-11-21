@@ -21,14 +21,29 @@ from q3tui.pipeline.base import StepContext, StepFailed
 
 def summary(r: dict) -> str:
     text = f"{r['role'].upper()}: {r['waived']}/{r['total']} waived, {r['open']} open (expected {r['expected_open']})"
+    unused = "; ".join(f"{w['waiver']} ({', '.join(w.get('ids') or []) or 'not Q3TUI'}" + (f": {w['why']}" if w.get("why") else "") + ")"
+                       for w in r.get("not_applied") or [])
+    unused = f"; waivers that matched no violation: {unused}" if unused else ""
     if r["ok"]:
-        return text
+        return text + unused
     old = ("; the report was read by a Q3TUI before nested objects were read: run step " + r["role"] + " again") if r.get("old_report") else ""
     return text + "; MISMATCH — " + "; ".join(x for x in (
         f"waived but still reported: {', '.join(r['still_open_but_waived'])}" if r["still_open_but_waived"] else "",
         f"open but not expected: {', '.join(r['waived_but_not_applied'])}" if r["waived_but_not_applied"] else "",
         f"no waive command for: {', '.join(r['not_expressed'])}" if r["not_expressed"] else "",
-        f"count {r['open']} ≠ {r['expected_open']}" if r["open"] != r["expected_open"] else "") if x) + old
+        f"count {r['open']} ≠ {r['expected_open']}" if r["open"] != r["expected_open"] else "") if x) + unused + old
+
+
+def not_applied(work: Path, role: str, waive: Path, log: str, plan: list[tuple[str, list[str], str]]) -> list[dict]:
+    """The waivers of the run that matched no violation (`<role>_not_applied.rpt` the script writes, vcstatic.parse_not_applied), each with
+    the violations it was written for and what the tool said about it in the log (`CDC_WAIVE_OPTION_INVALID: …`)."""
+    rpt = work / f"{role}_not_applied.rpt"
+    if not rpt.is_file():
+        return []
+    ids = {name: list(i) for name, i, _cmd in plan}
+    said = vcstatic.waive_warnings(log, waive.name)
+    return [{"waiver": w["waiver"], "ids": ids.get(w["waiver"], []), "why": said.get(w["line"], ""), "select": w["select"]}
+            for w in vcstatic.parse_not_applied(rpt.read_text(errors="replace"))]
 
 
 class CheckStep(AnalysisStep):
@@ -96,10 +111,12 @@ class CheckStep(AnalysisStep):
         for v in report["violations"]:
             ids.setdefault(sig(v), []).append(v["id"])
         total = len(report["violations"])
+        log = Path(res.log_path).read_text(errors="replace") if res.log_path and Path(res.log_path).is_file() else ""
         out = {**base, "runtime_s": round(time.monotonic() - t0, 1), "waived": total - sum(want.values()), "open": len(left), "expected_open": sum(want.values()),
                "not_expressed": skipped,
                "still_open_but_waived": sorted(i for s, n in (got - want).items() for i in ids.get(s, [])[:n]),
-               "waived_but_not_applied": sorted(i for s, n in (want - got).items() for i in ids.get(s, [])[:n])}
+               "waived_but_not_applied": sorted(i for s, n in (want - got).items() for i in ids.get(s, [])[:n]),
+               "not_applied": not_applied(work, role, waive, log, waivers.waiver_plan(report["violations"], plan["items"], role)[0])}
         if old:
             out["old_report"] = True
         out["ok"] = out["open"] == out["expected_open"] and not (skipped or out["still_open_but_waived"] or out["waived_but_not_applied"])
