@@ -31,9 +31,21 @@ def reset_lines(resets: list[str]) -> str:
     return "".join(f"create_reset -sense {'low' if _LOW.search(r) else 'high'} {r}\n" for r in resets)
 
 
+_CREATE_CLOCK = re.compile(r"create_clock\b[^\n]*?-name\s+\{?(\w+)")
+
+
+def created_clocks(text: str) -> list[str]:
+    """The names `create_clock -name` gives in SDC text (comment lines left out), in order, once each."""
+    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    return list(dict.fromkeys(m.group(1) for ln in lines for m in _CREATE_CLOCK.finditer(ln)))
+
+
 def group_lines(sdc: dict) -> str:
-    """Every clock of constraints/sdc/sdc.json its own asynchronous group (what a CDC check needs), unless the SDC groups them already."""
-    names = [c["name"] for c in sdc.get("clocks") or []]
+    """Every clock of constraints/sdc/sdc.json its own asynchronous group (what a CDC check needs), unless the SDC groups them already: the
+    clocks of `clocks` and the ones its `extra_tcl` creates (a virtual clock that times asynchronous inputs: no port, so not in `clocks`).
+    A clock in no user-defined group is VC Static's SETUP_CLOCK_GROUP_MISSING, which no waiver can name."""
+    names = list(dict.fromkeys([c["name"] for c in sdc.get("clocks") or []]
+                               + (created_clocks("\n".join(map(str, sdc.get("extra_tcl") or []))) if sdc.get("clocks") else [])))
     if sdc.get("clock_groups") or len(names) < 2:
         return ""
     return "set_clock_groups -asynchronous " + " ".join(f"-group {{{n}}}" for n in names) + "\n"

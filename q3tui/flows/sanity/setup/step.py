@@ -107,15 +107,13 @@ class Step(SanityStep):
 
     def clocks(self, engine) -> list[str]:
         """The SDC's clock names (sdc.json, else the `create_clock -name` of the SDC files)."""
-        import re
-
         from q3tui.core.project import read_json
 
         sdcj = read_json(engine.project.sdc_dir / "sdc.json", {}) or {}
         names = [str(c.get("name")) for c in sdcj.get("clocks") or [] if c.get("name")]
         if not names:
             for f in self.sdc_files(engine):
-                names += re.findall(r"create_clock\b[^\n]*?-name\s+\{?(\w+)", f.read_text(errors="replace"))
+                names += script.created_clocks(f.read_text(errors="replace"))
         return list(dict.fromkeys(names))
 
     def complete(self, engine, plan: setupmod.SanitySetup, des, top: str, clocks: list[str]) -> dict:
