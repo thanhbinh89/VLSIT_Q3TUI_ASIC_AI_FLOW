@@ -127,7 +127,9 @@ class WaiverStep(SanityStep):
                       "do not ask for them in the SDC):", "```tcl", applied, "```\n"]
         for v in batch:
             fields = "; ".join(f"{k}={str(x)[:160]}" for k, x in (v.get("fields") or {}).items())
-            lines.append(f"- **{v['id']}** {v['severity']} `{v['tag']}`: {v['message'][:300]}" + (f"\n  fields: {fields}" if fields else ""))
+            nested = "; ".join(f"{k} ({len(x)}): {', '.join(x)[:400]}" for k, x in (v.get("nested") or {}).items() if x)
+            lines.append(f"- **{v['id']}** {v['severity']} `{v['tag']}`: {v['message'][:300]}" + (f"\n  fields: {fields}" if fields else "")
+                         + (f"\n  every path of the report: {nested}" if nested else ""))
             sig = waivers.sig_id(role, v)
             if answers.get(sig):
                 lines.append(f"  The user answered: {answers[sig]} (settled: follow it, do not ask again)")
@@ -173,8 +175,9 @@ class WaiverStep(SanityStep):
             if d.action == "waive" and not d.reason.strip():
                 d = Decision(id=d.id, action="ask", reason="a waiver needs its evidence and none was given", question=f"Waive {v['tag']}: {v['message'][:120]}?")
             if d.action == "waive" and waivers.waive_command(v, {"id": v["id"], **d.model_dump()}, self.role) is None:
-                d = Decision(id=d.id, action="ask", reason=f"waivable by the review ({d.reason[:200]}), but the tool's report does not say which objects it is "
-                             "about, so no waive command can be written", question=f"{v['tag']} cannot be waived by command (no objects in the report). Accept it as open?",
+                why = waivers.no_selector_reason(v)
+                d = Decision(id=d.id, action="ask", reason=f"waivable by the review ({d.reason[:200]}), but {why}, so no waive command can be written",
+                             question=f"{v['tag']} cannot be waived by command ({why}). Accept it as open?",
                              options=["Yes, accept it as open", "No, fix the RTL"])
             if d.action in waivers.OPEN_ASKING and not d.question.strip():
                 d.question = f"{v['tag']}: {d.sdc_request or d.reason}"[:300]
@@ -184,6 +187,51 @@ class WaiverStep(SanityStep):
     def _item(self, v: dict, d: dict, answers: dict[str, str]) -> dict:
         sig = waivers.sig_id(self.role, v)
         return {**d, "id": v["id"], "sig": sig, "answer": answers.get(sig, ""), "handed_off": d.get("handed_off")}
+
+    def _by_violation(self, violations: list[dict], keyed: dict) -> dict[str, object]:
+        """{violation id: keyed[its sig id]}, else keyed[the id an older Q3TUI gave it (`legacy_sig_id`)] when no other violation of the report
+        had that id and it is no violation's id now: decisions and answers stored before nested objects were read are found again."""
+        role = self.role
+        new = [waivers.sig_id(role, v) for v in violations]
+        old = [waivers.legacy_sig_id(role, v) for v in violations]
+        count, now = {o: old.count(o) for o in old}, set(new)
+        out: dict[str, object] = {}
+        for v, n, o in zip(violations, new, old):
+            if n in keyed:
+                out[v["id"]] = keyed[n]
+            elif count[o] == 1 and o not in now and o in keyed:
+                out[v["id"]] = keyed[o]
+        return out
+
+    @staticmethod
+    def _unshare(it: dict) -> dict:
+        """A waiver asked only because its selector was shared goes back to the review's `waive` (`_one_waiver_per_selector` decides again)."""
+        s = it.get("shared")
+        if not s:
+            return it
+        return {**{k: x for k, x in it.items() if k != "shared"}, "action": "waive", "rule": s.get("rule", ""), "reason": s.get("reason", ""),
+                "question": "", "options": []}
+
+    def _one_waiver_per_selector(self, violations: list[dict], items: list[dict]) -> list[dict]:
+        """Never waive too much: a waiver applies to every violation of its tag its selector matches, so a `waive` whose selector also matches
+        a violation the review did not waive becomes a question (its decision is kept in `shared` and taken up again by the next run)."""
+        items = [self._unshare(i) for i in items]
+        same = waivers.shared(violations, self.role)
+        action = {i["id"]: i["action"] for i in items}
+        by_id = {v["id"]: v for v in violations}
+        out = []
+        for it in items:
+            others = [i for i in same.get(it["id"], []) if i != it["id"] and action.get(i) != "waive"]
+            if it["action"] == "waive" and others:
+                v = by_id[it["id"]]
+                why = (f"{it['rule']}: " if it.get("rule") else "") + str(it.get("reason", ""))
+                it = {**it, "action": "ask", "rule": "", "shared": {"rule": it.get("rule", ""), "reason": it.get("reason", ""), "with": others},
+                      "reason": f"waivable by the review ({why[:200]}), but its waiver ({str(waivers.selector(v, self.role, violations))[:200]}) would also waive "
+                                f"{', '.join(others)}, which the review did not waive: the tool cannot tell them apart, so no waiver is written",
+                      "question": f"{v['tag']} {it['id']} can be waived only together with {', '.join(others)}, which stay open. Accept {it['id']} as open?",
+                      "options": ["Yes, accept it as open", "No, fix the RTL"]}
+            out.append(it)
+        return out
 
     async def run(self, ctx: StepContext) -> None:
         engine, project, role = ctx.engine, ctx.project, self.role
@@ -199,13 +247,16 @@ class WaiverStep(SanityStep):
         answers = self.answers(engine)
         rtl, sdc, kn = self.rtl_hash(engine), self.sdc_hash(engine), self._knowledge_hash(engine)
         same = prev.get("rtl") == rtl and prev.get("sdc") == sdc and prev.get("knowledge") == kn and not ctx.regenerate
-        prev_by_sig = {i["sig"]: i for i in prev.get("items", [])}
+        earlier = self._by_violation(violations, {i["sig"]: i for i in prev.get("items", [])})  # {violation id: its earlier decision}
+        yours = self._by_violation(violations, answers)
+        said = {waivers.sig_id(role, v): yours[v["id"]] for v in violations if yours.get(v["id"])}  # your answers, by the ids of now
+        prev_by_sig = {waivers.sig_id(role, v): earlier[v["id"]] for v in violations if v["id"] in earlier}
         kept: dict[str, dict] = {}
         todo = []
         for v in violations:
-            p = prev_by_sig.get(waivers.sig_id(role, v))
-            if p and same and (p["action"] not in waivers.OPEN_ASKING or p.get("answer") == answers.get(p["sig"], "")):
-                kept[v["id"]] = self._item(v, p, answers)
+            p = earlier.get(v["id"])
+            if p and same and (p["action"] not in waivers.OPEN_ASKING or p.get("answer") == said.get(waivers.sig_id(role, v), "")):
+                kept[v["id"]] = self._item(v, p, said)
             else:
                 todo.append(v)
         modules = sorted(f.stem for f in self.rtl_files(engine))
@@ -213,15 +264,15 @@ class WaiverStep(SanityStep):
         size = int(self.options.get("batch") or BATCH)
         for n in range(0, len(todo), size):
             batch = todo[n:n + size]
-            stage = Stage(name=f"{role}_waivers_{n // size + 1}", system_prompt=self.system, prompt=self._prompt(engine, batch, answers, modules, prev_by_sig, registry),
+            stage = Stage(name=f"{role}_waivers_{n // size + 1}", system_prompt=self.system, prompt=self._prompt(engine, batch, said, modules, prev_by_sig, registry),
                           cwd=project.root, builtin_tools=["Read", "Grep", "Glob"], output_model=Review,
                           deny_dirs=[project.src_dir / "tb", project.src_dir / "sva", project.tb_dir, project.model_dir])
             out: Review = (await ctx.llm(stage)).output
-            for it in self._validate(engine, out, batch, modules, answers, registry):
-                old = prev_by_sig.get(it["sig"])
+            for it in self._validate(engine, out, batch, modules, said, registry):
+                old = earlier.get(it["id"])
                 it["handed_off"] = (old or {}).get("handed_off") if old and old["action"] == it["action"] and old.get("change") == it.get("change") else None
                 decided[it["id"]] = it
-        items = [kept.get(v["id"]) or decided[v["id"]] for v in violations]
+        items = self._one_waiver_per_selector(violations, [kept.get(v["id"]) or decided[v["id"]] for v in violations])
         plan = {"role": role, "top": report.get("top"), "rtl": rtl, "sdc": sdc, "knowledge": kn, "items": items}
         ctx.unchanged = not todo and prev.get("items") == items and bool(prev)
         write_json(self.artifact(engine, waivers_json(role)), plan)

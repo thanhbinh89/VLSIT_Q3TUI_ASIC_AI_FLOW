@@ -66,6 +66,7 @@ def _violation_detail(role: str):
         if v is None:
             return ""
         fields = "\n".join(f"- **{k}**: `{val}`" for k, val in (v.get("fields") or {}).items() if val)
+        fields += "".join(f"\n- **{k}** (every path): " + ", ".join(f"`{x}`" for x in vals) for k, vals in (v.get("nested") or {}).items() if vals)
         d = _decisions(app, role).get(key)
         text = f"**{key}** — `{v['tag']}` ({v.get('severity', '')})\n\n{v['message']}\n\n{fields}"
         if d:

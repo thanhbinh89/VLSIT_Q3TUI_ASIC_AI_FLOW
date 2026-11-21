@@ -23,11 +23,12 @@ def summary(r: dict) -> str:
     text = f"{r['role'].upper()}: {r['waived']}/{r['total']} waived, {r['open']} open (expected {r['expected_open']})"
     if r["ok"]:
         return text
+    old = ("; the report was read by a Q3TUI before nested objects were read: run step " + r["role"] + " again") if r.get("old_report") else ""
     return text + "; MISMATCH — " + "; ".join(x for x in (
         f"waived but still reported: {', '.join(r['still_open_but_waived'])}" if r["still_open_but_waived"] else "",
         f"open but not expected: {', '.join(r['waived_but_not_applied'])}" if r["waived_but_not_applied"] else "",
         f"no waive command for: {', '.join(r['not_expressed'])}" if r["not_expressed"] else "",
-        f"count {r['open']} ≠ {r['expected_open']}" if r["open"] != r["expected_open"] else "") if x)
+        f"count {r['open']} ≠ {r['expected_open']}" if r["open"] != r["expected_open"] else "") if x) + old
 
 
 class CheckStep(AnalysisStep):
@@ -86,7 +87,9 @@ class CheckStep(AnalysisStep):
             raise StepFailed(f"the {role.upper()} tool did not produce the report with the waivers applied (log: {res.log_path})")
         left, _ = vcstatic.parse_report(rpt.read_text(errors="replace"))
         by_id = {i["id"]: i for i in plan["items"]}
-        sig = waivers.signature
+        # (a report read before nested objects were read keeps the identity it was reviewed with, on both sides)
+        old = any("nested" not in v for v in report["violations"]) and any("nested" in v for v in left)
+        sig = waivers.legacy_signature if old else waivers.signature
         want = Counter(sig(v) for v in report["violations"] if by_id.get(v["id"], {}).get("action") != "waive")
         got = Counter(sig(v) for v in left)
         ids: dict[tuple, list[str]] = {}
@@ -97,6 +100,8 @@ class CheckStep(AnalysisStep):
                "not_expressed": skipped,
                "still_open_but_waived": sorted(i for s, n in (got - want).items() for i in ids.get(s, [])[:n]),
                "waived_but_not_applied": sorted(i for s, n in (want - got).items() for i in ids.get(s, [])[:n])}
+        if old:
+            out["old_report"] = True
         out["ok"] = out["open"] == out["expected_open"] and not (skipped or out["still_open_but_waived"] or out["waived_but_not_applied"])
         self.write(engine, check_json(role), out)
         table.write(self.table_files(engine), role, report, plan)
