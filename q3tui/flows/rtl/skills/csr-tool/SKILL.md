@@ -35,6 +35,12 @@ of the other architecture are in the file list but not elaborated.
   write wins over a same-cycle hardware write), `w1c` (writing 1 clears; a hardware load wins), from 2.2 `w0c` (writing 0 clears), `w2c` (any write to
   the register clears the field), `r2c` (a read returns the value and clears it), from 3.1 `wo` (write-only: stored, seen by hardware, reads 0).
   `reserved` reads 0, writes ignored, no ports.
+- **Register Event Sideband (APB4, 3.x; map `event_sideband: true`):** four more outputs: `o_reg_rd_en` = 1 for one cycle, the first ACCESS
+  cycle (the one whose field values the read returns), of every aligned read, mapped or not, with `o_reg_rd_addr` = the byte offset;
+  `o_reg_wr_en` = 1 for one cycle, the first ACCESS cycle (the fields take the written value at its end), of every accepted write to a register
+  with a software-writable field, with `o_reg_wr_addr`; an error transfer (PSLVERR) has no event; the addresses are 0 without an event. The
+  design compares the offset with the register's offset: a read of a FIFO data register pops in that cycle, a write pushes the stored value
+  in the next one. No other bus has it.
 - **Asynchronous = 1:** registers flop on the register clock; APB4 crosses with a request / acknowledge bridge, AXI4-Lite / AHB-Lite with the
   dual-clock queues. **Asynchronous = 0:** one clock; tie the bus clock and the register clock ports to the same clock (and the resets to the same
   reset).

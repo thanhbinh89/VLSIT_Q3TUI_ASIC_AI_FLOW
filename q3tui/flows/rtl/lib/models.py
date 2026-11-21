@@ -176,6 +176,10 @@ class CsrMap(BaseModel):
     rd_depth: int = Field(2, description="AXI4-Lite, QUEUED: outstanding reads, 1..8")
     wr_depth: int = Field(2, description="AXI4-Lite, QUEUED: outstanding writes, 1..8")
     ahb_endian: Literal["LITTLE", "BE8", "BE32"] = Field("LITTLE", description="AHB-Lite: byte-lane mapping of the bus")
+    event_sideband: bool = Field(False, description=(
+        "APB4 only (generator 3.x, workbook option 'Register Event Sideband'): the block also gives one-cycle pulses o_reg_rd_en / o_reg_wr_en "
+        "with the register offset o_reg_rd_addr / o_reg_wr_addr for every read / accepted write, for registers whose access itself has an effect "
+        "the spec states (a FIFO pop on read, a push on write, a latch on read)"))
     registers: list[CsrRegister] = Field(default_factory=list)
     req_ids: list[str] = Field(default_factory=list, description="the requirement ids the register map implements")
     summary: str = ""

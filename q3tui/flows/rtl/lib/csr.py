@@ -147,6 +147,10 @@ def validate(m: CsrMap, ver: tuple[int, int] | None = None, protocol: str | None
     if m.protocol not in protocols(ver):
         p.append(f"protocol is {m.protocol}: the generator here is version {ver[0]}.{ver[1]}, which makes APB4 only (AXI4-Lite and AHB-Lite need "
                  "CSR-Generator 3.0 or later)")
+    if m.event_sideband and m.protocol != "APB4":
+        p.append(f"event_sideband is an APB4 option of the generator (protocol is {m.protocol})")
+    elif m.event_sideband and ver is not None and ver < (3, 0):
+        p.append(f"event_sideband needs the generator 3.0 or later (here {ver[0]}.{ver[1]})")
     if m.data_width != 32:
         p.append(f"data_width is {m.data_width}: the tool supports 32 only")
     if not 4 <= m.addr_width <= 32:
@@ -211,6 +215,8 @@ def config_rows(m: CsrMap) -> list[tuple[str, object]]:
                  ("AXI Write Outstanding Depth", m.wr_depth)]
     elif m.protocol == "AHB-Lite":
         rows += [("Strobe Mode", m.strobe_mode), ("AHB Endian", m.ahb_endian)]
+    if m.protocol == "APB4" and m.event_sideband:  # only when asked: the workbooks of existing APB4 maps stay byte for byte the same
+        rows.append(("Register Event Sideband", 1))
     return rows
 
 
@@ -330,12 +336,21 @@ def _width(w: str, params: dict[str, str]) -> str:
     return w
 
 
+EVENT_PORTS = ("o_reg_rd_en", "o_reg_rd_addr", "o_reg_wr_en", "o_reg_wr_addr")  # APB4 Register Event Sideband (map `event_sideband`)
+
+
 def port_summary(sv: str, module: str) -> str:
-    """The generated module's ports as the integrator reads them: APB bus, clocks/resets, then the register ports grouped by register."""
+    """The generated module's ports as the integrator reads them: APB bus, clocks/resets, the event sideband (APB4, when generated), then the
+    register ports grouped by register."""
     ps = ports(sv)
     bus = [n for _, _, n in ps if n in BUS_PORTS]
-    rest = [(d, w, n) for d, w, n in ps if n not in bus]
-    lines = [f"module {module}", "bus / clocks: " + ", ".join(f"{n}" for n in bus), "register ports:"]
+    events = [(d, w, n) for d, w, n in ps if n in EVENT_PORTS]
+    rest = [(d, w, n) for d, w, n in ps if n not in bus and n not in EVENT_PORTS]
+    lines = [f"module {module}", "bus / clocks: " + ", ".join(f"{n}" for n in bus)]
+    if events:
+        lines.append("event sideband (one-cycle pulse in the first ACCESS cycle of each read / accepted write, with the register offset): "
+                     + ", ".join(f"{d} {w + ' ' if w else ''}{n}" for d, w, n in events))
+    lines.append("register ports:")
     lines += [f"  {d}{' ' + w if w else ''} {n}" for d, w, n in rest]
     return "\n".join(lines)
 

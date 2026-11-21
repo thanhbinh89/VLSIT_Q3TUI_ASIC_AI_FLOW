@@ -649,6 +649,39 @@ def test_a_bus_or_type_the_generator_does_not_make_and_a_bus_the_project_does_no
     assert "1..8" in "\n".join(csr.validate(csr.complete(_map(protocol="AXI4-Lite", outstanding="QUEUED", rd_depth=9)), (3, 5)))
 
 
+def test_the_apb4_event_sideband_is_a_workbook_row_and_an_apb4_option_only(tmp_path):
+    """FR-03: the map's `event_sideband` writes the generator's APB4 option "Register Event Sideband"; without it the workbook is unchanged."""
+    def rows(m, name):
+        ws = openpyxl.load_workbook(csr.write_workbook(csr.complete(m), tmp_path / f"{name}.xlsx"))["CSR"]
+        return {r[0].value: r[1].value for r in ws.iter_rows(min_row=3, max_row=13) if r[0].value}
+
+    plain, ev = rows(_map(), "plain"), rows(_map(event_sideband=True), "ev")
+    assert "Register Event Sideband" not in plain and ev == {**plain, "Register Event Sideband": 1}
+    assert csr.validate(csr.complete(_map(event_sideband=True)), (3, 5), "APB4") == []
+    assert "APB4 option" in "\n".join(csr.validate(csr.complete(_map(protocol="AXI4-Lite", event_sideband=True)), (3, 5)))
+    assert "3.0 or later" in "\n".join(csr.validate(csr.complete(_map(event_sideband=True)), (2, 4)))
+    sv = ("module m_x (\n  input  wire i_clk_apb,\n  output logic o_apb_pready,\n  output logic o_reg_rd_en,\n"
+          "  output logic [11:0] o_reg_rd_addr,\n  input  wire i_x_a\n);\nendmodule\n")
+    s = csr.port_summary(sv, "m_x")
+    assert "event sideband" in s and "o_reg_rd_addr" in s.split("register ports:")[0] and "i_x_a" in s.split("register ports:")[1]
+
+
+def test_the_real_generator_makes_the_apb4_event_sideband(tmp_path):
+    from q3tui.core.config import ToolRole
+    from q3tui.eda.tools import ToolSet, ToolEnv
+
+    if csr.version(REAL) is None or csr.version(REAL) < (3, 0):
+        pytest.skip("CSR-Generator 3.x is not installed")
+    m = csr.complete(_map(event_sideband=True))
+    work = tmp_path / "w"
+    wb = csr.write_workbook(m, work / "in.xlsx")
+    ts = ToolSet({"csr_gen": ToolRole.model_validate(preset_data()["roles"]["csr_gen"])}, ToolEnv(None, (), None), 120)
+    res = csr.run_tool(ts, REAL, wb, work)
+    assert res.ok, res.summary
+    names = {n for _, _, n in csr.ports((work / "RTL" / "m_blk_csr.sv").read_text())}
+    assert set(csr.EVENT_PORTS) <= names
+
+
 def test_ports_are_read_after_a_parenthesis_in_a_comment():
     """Version 3.x writes `0 (synchronous) or 1 (asynchronous); default …` in a parameter comment: the port list does not end there."""
     sv = ("module m_x #(\n  // Parameter values: 0 (synchronous) or 1 (asynchronous); default follows the workbook.\n"

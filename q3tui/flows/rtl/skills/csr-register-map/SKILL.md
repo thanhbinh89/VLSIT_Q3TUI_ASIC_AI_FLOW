@@ -22,6 +22,9 @@ AHB-Lite, its options, the address width), the clocking section (is there a regi
   tool gives are fixed (skill `csr-tool`): if the spec requires others, ask.
 - `addr_width`: the address bits the bus carries to the block (the spec's address width; 16 when it says nothing). `data_width` is 32 (the tool's only width).
 - `asynchronous`: true only when the spec says the registers are clocked by a clock asynchronous to the bus clock (the tool then adds a handshake bridge).
+- `event_sideband`: true only when the spec asks for the generator's APB4 "Register Event Sideband", or states that reading or writing a
+  register itself has an effect the field types cannot give (a read pops a FIFO, a write pushes into one, a read latches another register):
+  the block then reports each access (skill `csr-tool`). APB4 only; false otherwise.
 - Each register: `name`, `offset` (bytes, a multiple of 4, relative to the block's base), the fields with `msb`/`lsb`, `type`, `reset`, a one-line description. List
   the fields the spec gives; bits it leaves out are filled as `reserved` by code, do not list them.
 - A register wider than 32 bits is two registers (low word first); say so in `summary`.
