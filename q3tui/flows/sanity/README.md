@@ -45,8 +45,13 @@ In the TUI: step `cdc_waivers` / `rdc_waivers` → Files tab.
 - The CDC knowledge is `cdc_waivers/md/knowledge.md` (K1–K5). Add your own rules in the project: `config/sanity/cdc_knowledge.md`,
   `config/sanity/rdc_knowledge.md`.
 - A decision stays while the RTL, SDC and knowledge are unchanged. Only new violations and the ones waiting for an answer go to the LLM again.
-- Violations are identified across runs by what they are (tag + objects), not by the tool's per-run number.
-- A waiver the tool cannot express (the report names no objects) becomes a question, never an assumption.
+- Violations are identified across runs by what they are (tag + objects), not by the tool's per-run number, nor by the order the tool lists a
+  violation's paths in (all of them count, sorted).
+- A waiver names the convergence point (`-filter`), the source and the destination (`-from` / `-to`), or, when the destinations are only paths of
+  a list (`CDC_COHERENCY_MULTI_SYNC`), the tool's message (`-msg`): docs/spec/sanity-flow.md "How a waiver names its violations".
+- A waiver the tool cannot express (the report names no objects, or only a message with a placeholder Q3TUI cannot fill) becomes a question,
+  never an assumption. So does one that would also waive a violation the review did not waive: one waiver per selector, written only when the
+  review waived every violation it selects.
 
 ## Hand-off and SDC
 
@@ -65,12 +70,14 @@ In the TUI: step `cdc_waivers` / `rdc_waivers` → Files tab.
 | `handoff_flow` | the flow that owns the RTL and spec (default `rtl`) |
 
 The Tcl script is rewritten by code every run (`build/sanity/<role>_setup.tcl`): put your own lines in `extra_tcl`, not in that file.
-Each clock of `sdc.json` is put in its own asynchronous group by the script unless the SDC already has clock groups.
+Each clock of `sdc.json` is put in its own asynchronous group by the script unless the SDC already has clock groups: the clocks of `clocks` and the
+ones its `extra_tcl` creates (a virtual clock for asynchronous inputs).
 
 ## Rules the flow follows
 
 - The tool failing, or not being installed, is a failed step, never a pass. A report that counts violations the reader cannot parse fails the step.
-- `*_check` fails when the open violations are not exactly the ones the review did not waive (count and which).
+- `*_check` fails when the open violations are not exactly the ones the review did not waive (count and which). It names each waiver that
+  matched no violation (`waive_<role> -not_applied`) and what the tool said about it.
 - The RDC report is read with `-include_compressed`: the tool folds similar violations otherwise.
 
 ## Layout

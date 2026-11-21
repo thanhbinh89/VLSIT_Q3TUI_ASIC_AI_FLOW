@@ -31,7 +31,9 @@ The analysis reads `constraints/sdc/sdc.tcl`, the same file the FPGA and ASIC fl
 - With your own `constraints/sdc/sdc.tcl` and **no** `constraints/sdc/sdc.json`: used as it is; nothing is generated or overwritten.
 
 Resets: `create_reset` for the resets of sdc.json, else the reset inputs of the RTL's top (pyslang), `options.resets` wins. Clocks of an sdc.json without
-clock groups become one asynchronous group each; a hand-written SDC is trusted for its own groups. `options.extra_tcl` adds lines after the SDC.
+clock groups become one asynchronous group each: the clocks of `clocks` and every clock its `extra_tcl` creates (`create_clock -name …`; a virtual clock
+that times asynchronous inputs has no port, so it is no entry of `clocks`). A clock in no user-defined group is VC Static's `SETUP_CLOCK_GROUP_MISSING`,
+which names no object, so no waiver can take it. A hand-written SDC is trusted for its own groups. `options.extra_tcl` adds lines after the SDC.
 Every `constraints/sdc/*.tcl` is an input of the analysis, the review and the check: changing the SDC runs them again.
 
 ## The violation table
@@ -47,14 +49,15 @@ Every violation gets exactly one decision:
 
 | Action | Meaning | Then |
 |---|---|---|
-| `waive` | safe, under a knowledge rule whose conditions were all verified and cited (`rule`: K3, U1, …) or by a design reason with its evidence | a `waive_cdc` / `waive_rdc` command in `build/sanity/<role>_waive.tcl`, applied by `<role>_check`. A waiver the report cannot express (no objects named) becomes an `ask`, never an assumption |
+| `waive` | safe, under a knowledge rule whose conditions were all verified and cited (`rule`: K3, U1, …) or by a design reason with its evidence | a `waive_cdc` / `waive_rdc` command in `build/sanity/<role>_waive.tcl`, applied by `<role>_check`. A waiver the report cannot express (no objects named, or only a message with a placeholder Q3TUI cannot fill), or one that would also waive a violation the review did not waive, becomes an `ask`, never an assumption (see "How a waiver names its violations") |
 | `fix_rtl` | the RTL is unprotected (the usual answer for a structural problem): one module, the smallest structural change, reusing the synchronizers the design already has; the review checks that it removes the violation and creates no new crossing | scoped change request `[rtl:<module>] …` for the owner flow's `rtl` step |
 | `spec` | only when the spec text is missing, ambiguous or contradicts what the design must do (not to restate what the RTL should already do); `change` is the exact new requirement text | change request for the owner flow's `spec` step, asking to change only the affected requirements |
 | `sdc` | a constraint is missing or wrong in the SDC (e.g. a `set_max_delay` on a data path, a clock group, a reset input delay) | the exact SDC command(s) in `sdc_request` and a question; `sanity_handoff` adds plain constraint commands to `constraints/sdc/extra.tcl` (see Hand-off); anything else stays yours |
 | `ask` | a condition cannot be verified, no rule covers it | one question for you with 2–4 suggested answers |
 
 `sdc` and `ask` are engine questions (the Questions tab, the picker, `Ops.answer`); open ones hold the gate (`pending_reviews`; `--yes` or auto-approve passes
-it and the items stay open). Your answer is saved in `reviews/<role>_answers.json` (by a stable id of the violation: its tag and objects), makes the review
+it and the items stay open). Your answer is saved in `reviews/<role>_answers.json` (by a stable id of the violation: its tag and objects, the same in
+every run of the same RTL and SDC whatever order the tool lists its paths in), makes the review
 stale, and is given to the LLM as settled. To satisfy an SDC request, change the SDC (`sdc_add what=exception text='max_delay from=A to=B value=15'` when the
 SDC is sdc.json's, or edit your file): the analysis runs again on the new SDC.
 
@@ -125,14 +128,56 @@ read_sdc constraints/sdc/sdc.tcl                         ;# the shared SDC
 create_reset -sense low i_rst_n              ;# (resets: above)
 configure_rdc_corrupt -report_rdc_on_cdc true   ;# rdc only
 check_cdc                                    ;# check_rdc
-source build/sanity/cdc_waive.tcl                  ;# only in the check step's run
+source build/sanity/cdc_waive.tcl                  ;# only in the check step's run, and after it:
+catch {redirect -file <work>/cdc_not_applied.rpt {waive_cdc -not_applied}}   ;# the waivers that matched no violation
 report_violations -app CDC -verbose -file <work>/cdc_violations.rpt    ;# rdc: report_rdc -list -limit 0 -include_compressed -no_summary -hide_id -file … (compressed items too: the tool folds similar ones)
 ```
 
-The violations are read from that report (`lib/vcstatic.py`, both report formats), not from the log; infos are counted and dropped. A CDC waiver is the tag plus
-the objects (`-from` / `-to`, or the convergence point): VC Static numbers violations per run, so a waiver by `-id` would hit the wrong ones. An RDC waiver is
-the tag plus the message. `<role>_check` counts and compares by that same signature: 111 violations with 110 waived end with 1 open, a different count, a
-waived violation still reported, an open one that disappeared, or a waiver that cannot be written fails the step (`schemas/<role>_check.json`).
+The violations are read from that report (`lib/vcstatic.py`, both report formats), not from the log; infos are counted and dropped. A waiver names a
+violation by what it is (below), never by `-id`: VC Static numbers violations per run, so a waiver by `-id` would hit the wrong ones. `<role>_check` counts
+and compares by the violation's signature: 111 violations with 110 waived end with 1 open, a different count, a waived violation still reported, an open
+one that disappeared, or a waiver that cannot be written fails the step (`schemas/<role>_check.json`). A waiver that matched no violation is named in the
+step's summary and in `not_applied` of `schemas/<role>_check.json`: the waiver, the violations it was written for, what the tool said about it (its
+`CDC_WAIVE_OPTION_INVALID` warning at the waiver's line of `<role>_waive.tcl`) and what it selected (`waive_<role> -not_applied`). It fails the step only
+through what it leaves open.
+
+## How a waiver names its violations
+
+**The report.** A block of `report_violations -app CDC -verbose` nests: a name alone on a line opens a container (`SrcInfo`, `DestInfoList`,
+`ConvControlPathList`, …) for the lines indented under it. Each violation keeps `fields` (the first value of each name, nested or not), `top` (the objects,
+`SrcObject` / `DestObject`, that are fields of the block itself) and `nested` (the objects the report gives only inside lists, the `…List` containers of
+its paths: all their values, sorted). Its `message` is the line `report_violations -list` prints: each `[Field]` of the description is the field's value;
+a top-level container is what the tool prints for it (`[SrcInfo]` → its `SrcObject`; a clock list with one clock → `ClockName:ClockDomainId`, as
+`i_clk_sys:9`); anything else stays a placeholder (checked on FX1B's `crg`: 166 of 166 filled messages equal the tool's lines; the 19 left are infos).
+
+**The identity** (`waivers.signature`, the `sig` of the decisions and the key of your answers): the tag; the convergence point, else the source, else the
+message; the destination. An object the report gives only inside lists counts with all its values, sorted: VC Static lists the paths of a violation in
+any order (crg: the `cdc` and `cdc_check` runs of one RTL gave the two destinations of a `CDC_COHERENCY_MULTI_SYNC` in the other order). Q3TUI before
+this (101c379) took the first value of each object: decisions and answers stored with that id are found again (when no other violation of the report had
+it), and a report read then (no `nested`) keeps that identity in the check, which, when it fails, says to run the analysis again.
+
+**The waiver** (`waivers.selector`, after `-tag <tag>`):
+
+| The report gives | Waiver | Tags (examples) |
+|---|---|---|
+| a convergence point | `-filter {ConvergencePoint == "<point>"}` | `CDC_COHERENCY_RECONV_*`, `…_ASYNCSRCS_RECONV_*` |
+| a source and a destination outside its lists | `-from {<source>} -to {<destination>}` (names escaped as globs: `Q\[9\]`) | `CDC_UNSYNC_*`, `CDC_SYNC_*` (objects as fields of the block), `CDC_COHERENCY_BUS_NOCONV` (the sources of its paths) |
+| objects, its destinations only inside lists | `-msg {<message>}` | `CDC_COHERENCY_MULTI_SYNC` |
+| no object, a message with a placeholder left or with `{ } * ?` | none: the `waive` becomes `ask` | `SETUP_*` without objects |
+| RDC (`report_rdc -list`: the message only) | `-msg {<message>}` (`{ }` → `*`) | `RDC_*` |
+
+What VC Static X-2025.06 matches (`waive_cdc -preview` on crg, uart, timer and plic; `tests/test_sanity_fr03.py` fakes the same): `-from` the source
+that is a field of the block, or a source of its paths; `-to` only a destination that is a field of the block. An object in a container is neither (the
+`SrcInfo` of a `CDC_COHERENCY_MULTI_SYNC`: `CDC_WAIVE_OPTION_INVALID: waive_cdc Option 'from' doesn't exist in Violations`), and where a violation has no
+to point `-to` is ignored: a `CDC_COHERENCY_BUS_NOCONV` is selected by `-from` alone. A source written as a set of bit ranges (`Q{ [13:10] ,[8:0] }`) is
+never matched. `-msg` matches the whole message. So `-from` names the first source of the violation, unless it is a set of bit ranges or another violation
+of the tag has it too: then another of its sources that selects it alone.
+
+**One waiver per selector.** A waiver applies to every violation of its tag it matches (`waivers.shared`: the same convergence point or message, a source
+another violation has too). It is written once, named after its first violation (`# W_V5 selects V5, V6, …`), and only when the review waived every
+violation it selects. Otherwise the waived ones become `ask` ("V1 can be waived only together with V2, which stays open. Accept V1 as open?") and no
+waiver is written: their own decision is kept with them (`shared`) and taken up again by the next review, so once the others are waived too, one waiver
+covers them all.
 
 ## A VC Static lock a crashed run left
 
