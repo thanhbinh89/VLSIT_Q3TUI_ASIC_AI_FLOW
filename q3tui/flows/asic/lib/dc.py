@@ -69,26 +69,27 @@ def parse_area(text: str) -> dict:
     return out
 
 
-def parse_timing(text: str) -> dict:
-    """The worst setup path of report_timing (the first `slack`): {slack_ns, met, startpoint, endpoint, path_group, data_arrival_ns}."""
+def parse_timing(text: str, time_scale: float = 1.0) -> dict:
+    """The worst setup path of report_timing (the first `slack`): {slack_ns, met, startpoint, endpoint, path_group, data_arrival_ns}.
+    `time_scale`: library time units per ns (1000 for a ps library, FR-04; lib/units.py): the times are returned in ns."""
     out: dict = {}
     m = re.search(r"slack \((MET|VIOLATED)[^)]*\)\s+(-?[\d.]+)", text)
     if m:
         out["met"] = m.group(1) == "MET"
-        out["slack_ns"] = float(m.group(2))
+        out["slack_ns"] = round(float(m.group(2)) / time_scale, 4)
     for key, pat in (("startpoint", r"Startpoint:\s+(\S+)"), ("endpoint", r"Endpoint:\s+(\S+)"), ("path_group", r"Path Group:\s+(\S+)")):
         m = re.search(pat, text)
         if m:
             out[key] = m.group(1)
     m = re.search(r"data arrival time\s+(-?[\d.]+)", text)
     if m:
-        out["data_arrival_ns"] = float(m.group(1))
+        out["data_arrival_ns"] = round(float(m.group(1)) / time_scale, 4)
     return out
 
 
-def parse_qor(text: str) -> dict:
+def parse_qor(text: str, time_scale: float = 1.0) -> dict:
     """From report_qor (one block per path group): the worst setup slack `wns_ns`, the total negative slack `tns_ns`, the number of
-    violating paths, the most levels of logic, the hold violation."""
+    violating paths, the most levels of logic, the hold violation (times in ns: `time_scale` as parse_timing)."""
     def vals(pat: str) -> list[float]:
         return [float(x) for x in re.findall(pat, text)]
 
@@ -99,14 +100,15 @@ def parse_qor(text: str) -> dict:
         v = vals(pat)
         if v:
             r = pick(v)
-            out[key] = int(r) if key in ("violating_paths", "logic_levels") else round(r, 4)
+            out[key] = int(r) if key in ("violating_paths", "logic_levels") else round(r / time_scale, 4)
     return out
 
 
-def parse_groups(qor: str, periods: dict[str, float] | None = None) -> list[dict]:
+def parse_groups(qor: str, periods: dict[str, float] | None = None, time_scale: float = 1.0) -> list[dict]:
     """One entry per clock path group of report_qor: {group, slack_ns, period_ns, target_mhz, fmax_mhz}. The Fmax is what the clock could run at
     with the worst setup path of the group as it is now: 1000 / (period − slack). `bound` is "estimate" when the clock is missed (what the library can reach, about) and "at_least" when it is met (the tool stops at zero slack: it can go faster). `periods` ({clock name: period}) wins over the report's
-    own (rounded) period. Internal groups (`**async_default**`, …) are left out."""
+    own (rounded) period; both are in ns (the report's in library units: `time_scale` as parse_timing). Internal groups
+    (`**async_default**`, …) are left out."""
     out = []
     for m in re.finditer(r"Timing Path Group '([^']+)'(.*?)(?=Timing Path Group|\n\s*Cell Count|\Z)", qor, re.S):
         name, body = m.group(1), m.group(2)
@@ -114,10 +116,10 @@ def parse_groups(qor: str, periods: dict[str, float] | None = None) -> list[dict
             continue
         sl = re.search(r"Critical Path Slack:\s+(-?[\d.]+)", body)
         pd = re.search(r"Critical Path Clk Period:\s+([\d.]+)", body)
-        period = (periods or {}).get(name) or (float(pd.group(1)) if pd else None)
+        period = (periods or {}).get(name) or (float(pd.group(1)) / time_scale if pd else None)
         if not sl or not period:
             continue
-        slack = float(sl.group(1))
+        slack = round(float(sl.group(1)) / time_scale, 4)
         usable = period - slack
         # (met: the tool stops optimizing at zero slack, so the number is what it reached, not the limit: "at_least")
         out.append({"group": name, "slack_ns": slack, "period_ns": period, "target_mhz": round(1000.0 / period, 1),

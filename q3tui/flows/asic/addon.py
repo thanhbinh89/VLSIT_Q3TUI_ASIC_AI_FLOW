@@ -73,6 +73,12 @@ def register(api) -> None:
     api.setting("asic_synth", "compile", "Compile command", "text", "compile_ultra, compile_ultra -gate_clock, compile -map_effort high, …")
     api.setting("asic_synth", "min_slack_ns", "Min setup slack (ns)", "float", "The review fails when the worst slack is below this.")
     api.setting("asic_synth", "max_area_um2", "Max area (µm²)", "float", "The review fails above this area; empty: no budget.", nullable=True)
+    api.setting("asic_synth", "lib_time_unit", "Library time unit", "choice",
+                "The time unit of the library. The SDC is in ns; for a ps library the ASIC copy of the SDC is scaled and the reports "
+                "are read back in ns (Design Compiler does not convert SDC units).", choices=(("ns", "ns"), ("ps", "ps")), default="ns")
+    api.setting("asic_synth", "lib_cap_unit", "Library capacitance unit", "choice",
+                "The capacitance unit of the library: set_load and the other capacitances of the SDC (pF) are scaled for an fF library.",
+                choices=(("pF", "pF"), ("fF", "fF")), default="pF")
     api.setting("asic_port", "min_mem_words", "Smallest memory worth a finding (words)", "int",
                 "Unpacked arrays of at least this many words are reported as memories without a macro.")
     api.setting("asic_port", "handoff_flow", "Hand findings to flow", "text", "The flow that owns the RTL ((default rtl)).")
