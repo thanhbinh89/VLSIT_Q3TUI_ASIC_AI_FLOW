@@ -1,5 +1,8 @@
 """ASIC step `asic_lec`: Formality proves the netlist equals the RTL (tool role `asic_lec`). `schemas/asic_lec.json` holds the result,
-`build/syn/asic/reports/lec.rpt` the matched / failing points. A tool that is not there, or a run without a verdict, is a failed step."""
+`build/syn/asic/reports/lec.rpt` the matched / failing points. A tool that is not there, or a run without a verdict, is a failed step.
+
+The reference is the RTL as asic_synth read it: a memory module's target body (`bodies` of asic_synth) is the reference too, and a black box
+(`blackbox` of asic_synth) is a black box on both sides (its stub and its netlist design read as interfaces), matched by its pins."""
 
 from __future__ import annotations
 
@@ -25,7 +28,27 @@ class Step(AsicStep):
 
     def inputs(self, engine) -> list[Path]:
         net = self.netlist(engine)
-        return [self.artifact(engine, SYNTH_JSON), *self.rtl_files(engine), *([net] if net.is_file() else [])]
+        return [self.artifact(engine, SYNTH_JSON), *self.rtl_files(engine), *([net] if net.is_file() else []), *self.body_files(engine, self.synth_options(engine))]
+
+    def synth_options(self, engine) -> dict:
+        """asic_synth's options (its bodies and black boxes are the reference's too)."""
+        synth = next((s for s in engine.steps if s.kind == "asic.asic_synth"), None)
+        return dict(synth.options) if synth else {}
+
+    def black_boxes(self, engine, top: str) -> tuple[list[Path], tuple[list[str], list[str]] | None]:
+        """(the reference's files, (its black boxes, their designs in the netlist)) from asic_synth's memory plan; (the RTL, None) without one."""
+        from q3tui.flows.fpga.lib import memories as memmod
+
+        opts = self.synth_options(engine)
+        if not (opts.get("bodies") or opts.get("blackbox")):
+            return self.rtl_files(engine), None
+        plan = memmod.make_plan(engine.project, opts, self.rtl_files(engine), top, self.asic_dir(engine) / "stubs", None,
+                                min_words=self.min_mem_words(engine))  # (as asic_synth: `blackbox: true` names the same modules)
+        if not plan.blackbox:
+            return plan.files, None
+        net = self.netlist(engine)
+        impl = memmod.netlist_modules(net.read_text(errors="replace") if net.is_file() else "", plan.facts.modules, plan.blackbox)
+        return plan.files, (plan.blackbox, impl)
 
     def outputs(self, engine) -> list[Path]:
         p, rep = self.artifact(engine, LEC_JSON), self.reports_dir(engine) / "lec.rpt"
@@ -55,7 +78,15 @@ class Step(AsicStep):
         svf = self.asic_dir(engine) / "netlist" / f"{top}.svf"
         script = self.asic_dir(engine) / "lec.tcl"
         project.backup([script])
-        script.write_text(fm.script_text(self.rtl_files(engine), top, libs, self.netlist(engine), svf, work, self.options))
+        from q3tui.flows.fpga.lib import memories as memmod
+
+        try:
+            files, bb = await anyio.to_thread.run_sync(lambda: self.black_boxes(engine, top))
+        except memmod.PlanError as exc:
+            raise StepFailed(f"equivalence check not run: {exc}") from exc
+        if bb and not bb[1]:
+            raise StepFailed(f"equivalence check not run: the netlist has no design of the black box(es) {', '.join(bb[0])} (run asic_synth again)")
+        script.write_text(fm.script_text(files, top, libs, self.netlist(engine), svf, work, self.options, bb))
         ctx.emit("log", message=f"checking {top}: RTL against {project.rel(self.netlist(engine))}…")
         t0 = time.monotonic()
         res = await anyio.to_thread.run_sync(lambda: toolmod.run_role(

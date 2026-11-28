@@ -75,6 +75,13 @@ def register(api) -> None:
     api.setting("asic_synth", "max_area_um2", "Max area (µm²)", "float", "The review fails above this area; empty: no budget.", nullable=True)
     api.setting("asic_port", "min_mem_words", "Smallest memory worth a finding (words)", "int",
                 "Unpacked arrays of at least this many words are reported as memories without a macro.")
+    # memory modules (fpga/lib/memories.py, docs/spec/asic-flow.md "Memories"): asic_lec takes the same
+    api.setting("asic_synth", "bodies", "Memory bodies", "lines", "module=file, one per line: Design Compiler (and Formality, as the reference) "
+                "reads that file instead of the RTL file that defines the module; src/rtl stays the reference of rtl, dv and sanity.")
+    api.setting("asic_synth", "blackbox", "Memory black boxes", "lines", "Module names or patterns, one per line (true: every memory module): "
+                "a port-only stub, kept as it is and a black box in the LEC; its area is estimated from the PDK's sram_um2_per_bit.")
+    api.setting("asic_synth", "max_register_kbit", "Max memory from registers (kbit)", "int", "Design Compiler builds every array from flip-flops: "
+                "arrays outside bodies / black boxes holding more than this stop the step before it runs (default 64; 0: no limit).", nullable=True)
     api.setting("asic_port", "handoff_flow", "Hand findings to flow", "text", "The flow that owns the RTL ((default rtl)).")
 
     @api.action("asic_handoff", "Hand the ASIC port findings (FPGA primitives, memories without a macro, power-up values, …) to the flow that "

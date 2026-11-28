@@ -2,7 +2,12 @@
 
 The Tcl script is written by code (`lib/dc.py`); the netlist goes to `build/syn/asic/netlist/`, the reports to `build/syn/asic/reports/`, the numbers
 (area, worst slack, power, violations) and the verdict against `min_slack_ns` / `max_area_um2` to `schemas/asic_synth.json`.
-A missing tool or library is a failed step ("not run"), never a pass."""
+A missing tool or library is a failed step ("not run"), never a pass.
+
+Memory modules (fpga/lib/memories.py, docs/spec/asic-flow.md "Memories"): `options.bodies` gives a module a target body, `options.blackbox` makes
+it a black box (a port-only stub kept as it is; `options.blackbox_timing` times its pins); `asic_synth.json` gives the logic and the memories
+apart (a black box's area from the PDK's `sram_um2_per_bit`, an estimate). Design Compiler builds every array from flip-flops: more than
+`options.max_register_kbit` of them stops the step before it runs, with what to set."""
 
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from q3tui.eda.base import ToolUnavailable
 from q3tui.flows.asic.lib import dc
 from q3tui.flows.asic.lib.base import REPORTS, SYNTH_JSON, AsicStep
 from q3tui.flows.fpga.lib import hints
+from q3tui.flows.fpga.lib import memories as memmod
 from q3tui.flows.fpga.lib import sdc as sdcmod
 from q3tui.pipeline.base import StepContext, StepFailed
 
@@ -33,11 +39,26 @@ class Step(AsicStep):
     title = "ASIC synthesis"
     deps = ("asic_port", "sdc")
     tool_roles = ("asic_synth",)
-    hashed_options = ("library", "compile", "max_paths", "extra_tcl", "defines", "min_slack_ns", "max_area_um2")  # (staleness: these change the result)
+    hashed_options = ("library", "compile", "max_paths", "extra_tcl", "defines", "min_slack_ns", "max_area_um2",
+                      "bodies", "blackbox", "blackbox_timing", "max_register_kbit")  # (staleness: these change the result)
+    uses_memory_modules = True
+    uses_min_mem_words = True
 
     def inputs(self, engine) -> list[Path]:
         # (sdc.json too: the ASIC's own clock frequencies are in it, not in the shared Tcl files)
-        return [self.filelist(engine), *self.rtl_files(engine), *self.sdc_inputs(engine), sdcmod.config_path(engine.project)]
+        return [self.filelist(engine), *self.rtl_files(engine), *self.sdc_inputs(engine), sdcmod.config_path(engine.project), *self.body_files(engine)]
+
+    def memory_plan(self, engine) -> tuple[memmod.Plan, object]:
+        """(the memory plan, the design as Design Compiler reads it); PlanError when a setting cannot be applied."""
+        memmod.max_register_bits(self.options)
+        top = self.top(engine)
+        plan = memmod.make_plan(engine.project, self.options, self.rtl_files(engine), top, self.asic_dir(engine) / "stubs", None,
+                                min_words=self.min_mem_words(engine))
+        if plan.bodies:
+            from q3tui.hdl import memories as hdlmem
+
+            return plan, hdlmem.scan(plan.files, top)
+        return plan, plan.facts
 
     def outputs(self, engine) -> list[Path]:
         rep, net = self.reports_dir(engine), self.netlist(engine)
@@ -85,6 +106,19 @@ class Step(AsicStep):
                 raise ToolUnavailable("the `asic_synth` tool was not found (module synopsys/syn; see config/tools.json / `q3tui tools check`)")
         except ToolUnavailable as exc:
             raise StepFailed(f"ASIC synthesis not run: {exc}") from exc
+        try:
+            plan, facts = await anyio.to_thread.run_sync(lambda: self.memory_plan(engine))
+        except memmod.PlanError as exc:
+            raise StepFailed(f"ASIC synthesis not run: {exc}") from exc
+        for note in plan.notes:
+            ctx.emit("warning", message=note)
+        stop = memmod.over_limit(memmod.register_arrays(facts, set(plan.blackbox), plan.min_words), memmod.max_register_bits(self.options), "Design Compiler", plan, "asic")
+        if stop:  # (Design Compiler builds every array from flip-flops: said before it runs for hours)
+            raise StepFailed(f"ASIC synthesis not run: {stop}")
+        if plan.active:
+            ctx.emit("log", message="memories: " + "; ".join([*(f"{m} from {project.rel(p)}" for m, p in plan.bodies.items()),
+                                                            *(f"{m} as a black box" for m in plan.blackbox)]))
+        keep = bool(self.memory_modules(engine)) or plan.active  # (the memory instances keep their own area: you asked for them apart)
         work = self.workdir(engine)
         for n in (*REPORTS, "dc.log", "dc.out"):
             (work / n).unlink(missing_ok=True)
@@ -93,7 +127,8 @@ class Step(AsicStep):
         script.parent.mkdir(parents=True, exist_ok=True)
         project.backup([script])
         sdc, overridden, sdc_cfg = self._constraints(ctx)
-        script.write_text(dc.script_text(self.rtl_files(engine), top, libs, sdc, work, netlist, self.options))
+        script.write_text(dc.script_text(plan.files, top, libs, sdc, work, netlist, self.options,
+                                         memmod.dc_lines(plan, keep) if keep and plan.facts is not None else None))
         ctx.emit("log", message=f"synthesizing {top} with {Path(libs[0]).name}"
                                 + (f" at {', '.join(f'{n} {m:g} MHz' for n, m in overridden.items())} (its own ASIC clock)" if overridden else "") + "…")
         t0 = time.monotonic()
@@ -119,7 +154,7 @@ class Step(AsicStep):
                 tg.start_soon(watch)
                 try:
                     res = await anyio.to_thread.run_sync(lambda: toolmod.run_role(
-                        tools, "asic_synth", work, {"script": script, "top": top, "filelist": self.filelist(engine), "files": self.rtl_files(engine),
+                        tools, "asic_synth", work, {"script": script, "top": top, "filelist": self.filelist(engine), "files": plan.files,
                                                     "workdir": work}, log_name="dc.out"), abandon_on_cancel=True)
                     finished = True
                 finally:
@@ -155,7 +190,18 @@ class Step(AsicStep):
         verdict["overall"] = "fail" if "fail" in verdict.values() else "pass"
         groups = dc.parse_groups(text("qor.rpt"), {c.name: c.period_ns for c in (sdc_cfg.clocks if sdc_cfg else [])})
         fmax = min((g["fmax_mhz"] for g in groups if g["fmax_mhz"]), default=None)  # the slowest clock limits what the design is good for
-        self.write(engine, SYNTH_JSON, {
+        memories = {}
+        if plan.facts is not None:  # (the logic and the memories apart: the memory instances of the hierarchical area, a black box's estimate)
+            from q3tui.flows.asic.lib import pdks
+
+            found = pdks.locate(libs[0], project)
+            pdk = found[0] if found else None
+            data = plan.summary(project)
+            if plan.active:
+                data["files"] = [project.rel(f) for f in plan.files]
+            memories = {"memories": data, **memmod.asic_split(plan, memmod.dc_rows(text("area.rpt")), area.get("total_um2"),
+                                                                (pdk.sram_um2_per_bit or None) if pdk else None, (pdk.nand2_um2 or None) if pdk else None)}
+        self.write(engine, SYNTH_JSON, {**memories,
             "tool": _version(res.log_path), "top": top, "library": libs, "status": "pass", "runtime_s": round(time.monotonic() - t0, 1),
             "log": project.rel(Path(res.log_path)), "netlist": project.rel(netlist), "svf": project.rel(work / f"{top}.svf"),
             "clocks": [{"name": c.name, "period_ns": c.period_ns, "freq_mhz": c.freq_mhz} for c in (sdc_cfg.clocks if sdc_cfg else [])],

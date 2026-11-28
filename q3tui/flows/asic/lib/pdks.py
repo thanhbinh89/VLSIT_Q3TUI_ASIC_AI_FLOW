@@ -24,6 +24,8 @@ class Pdk:
     corners: tuple[tuple[str, str], ...] = field(default_factory=tuple)  # (label, path) in name order
     default: str = ""  # the corner label picked with the technology
     probe_ns: float = 0.0  # the period the quick Fmax estimate starts from (0: its default)
+    sram_um2_per_bit: float = 0.0  # the area of one bit of a compiled SRAM (0: not known): a black-boxed memory's area estimate
+    nand2_um2: float = 0.0  # the area of the NAND2 gate (0: not known): area as NAND2 equivalents
 
     @property
     def label(self) -> str:
@@ -83,7 +85,8 @@ def catalog(project=None) -> list[Pdk]:
     for e in entries(project):
         files = e["files"]
         if files:
-            out.append(Pdk(e["id"], str(e.get("title") or e["id"]), int(e.get("node_nm") or 0), str(e.get("foundry") or ""), _corners(files), str(e.get("default") or ""), float(e.get("probe_ns") or 0)))
+            out.append(Pdk(e["id"], str(e.get("title") or e["id"]), int(e.get("node_nm") or 0), str(e.get("foundry") or ""), _corners(files), str(e.get("default") or ""), float(e.get("probe_ns") or 0),
+                           float(e.get("sram_um2_per_bit") or 0), float(e.get("nand2_um2") or 0)))
     return sorted(out, key=lambda p: (-p.node_nm, p.id))
 
 
