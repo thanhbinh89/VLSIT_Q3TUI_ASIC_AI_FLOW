@@ -80,10 +80,10 @@ def fix_prompt(*, module: str, path: str, problems: str, code: str, reqs: list[s
                keep_ports: list[str] | None = None, generated: bool = False) -> str:
     """A fresh small session: the problems and the current content — never the old session. `req_text`: the module is
     the user's imported RTL (conform it to the rules, keep what it does; tag the REQs where they are implemented).
-    `generated`: the module comes from a generator (the csr step's APB-CSR-Generator): fix the findings only."""
+    `generated`: the module comes from a generator (the csr step's CSR generator): fix the findings only."""
     imported = ""
     if generated:
-        imported = ("\nFile này do công cụ sinh ra (APB-CSR-Generator, bước csr): chỉ sửa đúng các vấn đề trên. GIỮ NGUYÊN tên module, "
+        imported = ("\nFile này do công cụ sinh ra (CSR-Generator, bước csr): chỉ sửa đúng các vấn đề trên. GIỮ NGUYÊN tên module, "
                     "tên/độ rộng/thứ tự port (module cha nối vào chúng), chức năng, offset và reset của thanh ghi, và dòng header. "
                     "Không áp quy tắc đặt tên RTL của dự án cho file này. Bit của bus không dùng theo thiết kế (vd. `i_pprot`, các bit "
                     "cao của `pwdata` khi thanh ghi hẹp hơn) thì tắt cảnh báo đúng chỗ bằng `/* verilator lint_off UNUSEDSIGNAL */` … "
@@ -105,10 +105,10 @@ def fix_prompt(*, module: str, path: str, problems: str, code: str, reqs: list[s
 
 
 def change_generated_prompt(*, module: str, path: str, requests: list[str], code: str) -> str:
-    """A fresh small session: change requests for a module a generator made (the csr step's APB-CSR-Generator), applied in place: only the behaviour
+    """A fresh small session: change requests for a module a generator made (the csr step's CSR generator), applied in place: only the behaviour
     they name changes, the interface and the registers stay as the tool made them."""
     return (f"# Task: thay đổi `{module}` → `{path}` theo yêu cầu\n"
-            "File này do công cụ sinh ra (APB-CSR-Generator, bước csr) và được phép sửa trực tiếp. Yêu cầu thay đổi (áp dụng; yêu cầu nào file đã "
+            "File này do công cụ sinh ra (CSR-Generator, bước csr) và được phép sửa trực tiếp. Yêu cầu thay đổi (áp dụng; yêu cầu nào file đã "
             "đáp ứng thì bỏ qua):\n" + "\n".join(f"- {r}" for r in requests) + "\n\n"
             "Chỉ đổi đúng hành vi mà yêu cầu nêu (vd. cạnh clock mà một lần ghi có hiệu lực, số wait state, thời điểm PREADY). GIỮ NGUYÊN tên module, "
             "tên/độ rộng/thứ tự port (module cha nối vào chúng), offset, reset và kiểu truy cập của thanh ghi, và dòng header. Không áp quy tắc đặt "

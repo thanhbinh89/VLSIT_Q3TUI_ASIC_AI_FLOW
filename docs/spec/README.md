@@ -39,7 +39,7 @@ spec ─► rules ─► parse ─► config ─► csr ─► rtl ─► format
 | **config** | locked parameters, constraints checked by code (`schemas/final_config.json`) | — |
 | **rtl** (rtl flow) | SystemVerilog per module, lint clean, synthesis report | — |
 
-The built-in `rtl` flow ([rtl-flow.md](rtl-flow.md)) generates the RTL alone and checks it (rules → Verible flags, CSR from the APB-CSR-Generator,
+The built-in `rtl` flow ([rtl-flow.md](rtl-flow.md)) generates the RTL alone and checks it (rules → Verible flags, CSR from the CSR generator,
 format, style lint, smoke test); `dv` ([dv-flow.md](dv-flow.md)) builds a UVM testbench from the spec alone (never from the RTL until the last phase of `tb`): a reviewed verification contract (`testplan`), the testbench with the RTL as its DUT (`tb`), the simulations (`simulate`); `fpga`, `asic` and `project` are the synthesis and settings flows. The built-in `example` flow (spec → parse) is a minimal folder flow to copy. Users write
 their own flows from the registered step kinds ([flows.md](flows.md)).
 

@@ -21,7 +21,7 @@ import anyio
 
 from q3tui.eda import tools as toolmod
 from q3tui.eda.base import ToolUnavailable
-from q3tui.flows.asic.lib import dc
+from q3tui.flows.asic.lib import dc, units
 from q3tui.flows.asic.lib.base import REPORTS, SYNTH_JSON, AsicStep
 from q3tui.flows.fpga.lib import hints
 from q3tui.flows.fpga.lib import memories as memmod
@@ -40,7 +40,8 @@ class Step(AsicStep):
     deps = ("asic_port", "sdc")
     tool_roles = ("asic_synth",)
     hashed_options = ("library", "compile", "max_paths", "extra_tcl", "defines", "min_slack_ns", "max_area_um2",
-                      "bodies", "blackbox", "blackbox_timing", "max_register_kbit")  # (staleness: these change the result)
+                      "bodies", "blackbox", "blackbox_timing", "max_register_kbit",
+                      "lib_time_unit", "lib_cap_unit")  # (staleness: these change the result)
     uses_memory_modules = True
     uses_min_mem_words = True
 
@@ -72,23 +73,32 @@ class Step(AsicStep):
         return self.missing_rtl(engine)
 
     def _constraints(self, ctx: StepContext) -> tuple[Path | None, dict[str, float], "sdcmod.SdcConfig | None"]:
-        """(the SDC file to source, the clocks with their own ASIC frequency {name: MHz}, the constraints in effect). When no clock has one that is
-        the shared `constraints/sdc/sdc.tcl`; otherwise `constraints/sdc/sdc.json` with those clocks changed is rendered into `build/syn/asic/sdc/` — the FPGA's SDC stays as it is.
-        The ASIC frequency of a clock is set in the SDC tab (*ASIC MHz*) or `sdc_set key=clock.<name>.asic_freq_mhz`."""
+        """(the SDC file to source, the clocks with their own ASIC frequency {name: MHz}, the constraints in effect). When no clock has one and the
+        library is in ns / pF that is the shared `constraints/sdc/sdc.tcl`; otherwise `constraints/sdc/sdc.json` with those clocks changed is rendered
+        into `build/syn/asic/sdc/`, its times and capacitances scaled to the library's units (`lib_time_unit`, `lib_cap_unit`: FR-04, lib/units.py)
+        — the FPGA's SDC stays as it is. The ASIC frequency of a clock is set in the SDC tab (*ASIC MHz*) or
+        `sdc_set key=clock.<name>.asic_freq_mhz`."""
         engine, project = ctx.engine, ctx.project
         cfg = sdcmod.load(project)
         shared = sdcmod.sdc_dir(project) / "sdc.tcl"
-        want = {c.name: c.asic_freq_mhz for c in (cfg.clocks if cfg else []) if c.asic_freq_mhz}
-        if not want:
+        t, c = units.scales(self.options)
+        want = {k.name: k.asic_freq_mhz for k in (cfg.clocks if cfg else []) if k.asic_freq_mhz}
+        if not want and t == 1.0 and c == 1.0:
             return (shared if shared.is_file() else None), {}, cfg
+        out = self.asic_dir(engine) / "sdc"
+        out.mkdir(parents=True, exist_ok=True)
+        if cfg is None:  # (no sdc.json: the shared Tcl files, scaled)
+            if not shared.is_file():
+                return None, {}, cfg
+            for f in sorted(sdcmod.sdc_dir(project).glob("*.tcl")):
+                (out / f.name).write_text(units.scale_sdc(f.read_text(), t, c))
+            return out / "sdc.tcl", {}, cfg
         cfg = cfg.model_copy(deep=True)
         for name, mhz in want.items():
             sdcmod.apply_edit(cfg, f"clock.{name}.freq_mhz", str(mhz))
         ports = sdcmod.top_ports(project, self.filelist(engine), self.top(engine))
-        out = self.asic_dir(engine) / "sdc"
-        out.mkdir(parents=True, exist_ok=True)
         for fname, text in sdcmod.render(cfg, ports).items():
-            (out / fname).write_text(text)
+            (out / fname).write_text(units.scale_sdc(text, t, c))
         return out / "sdc.tcl", want, cfg
 
     async def run(self, ctx: StepContext) -> None:
@@ -97,6 +107,10 @@ class Step(AsicStep):
         libs = self.libraries(engine)
         if not libs:
             raise StepFailed("ASIC synthesis not run: no library — set `library` (the .db of the standard cells) in Settings → asic_synth")
+        try:
+            tscale, _ = units.scales(self.options)
+        except ValueError as exc:
+            raise StepFailed(f"ASIC synthesis not run: {exc} (Settings → asic_synth)") from exc
         missing = [x for x in libs if not Path(x).is_file()]
         if missing:
             raise StepFailed(f"ASIC synthesis not run: library not found: {', '.join(missing)} (Settings → asic_synth)")
@@ -179,7 +193,8 @@ class Step(AsicStep):
             f = rep / name
             return f.read_text(errors="replace") if f.is_file() else ""
 
-        area, timing, qor, power = dc.parse_area(text("area.rpt")), dc.parse_timing(text("timing.rpt")), dc.parse_qor(text("qor.rpt")), dc.parse_power(text("power.rpt"))
+        area, timing, qor = dc.parse_area(text("area.rpt")), dc.parse_timing(text("timing.rpt"), tscale), dc.parse_qor(text("qor.rpt"), tscale)
+        power = dc.parse_power(text("power.rpt"))
         viol, checks, unconstrained = dc.violations(text("constraints.rpt")), dc.check_design(text("check_design.rpt")), dc.unconstrained(text("check_timing.rpt"))
         min_slack = float(self.options.get("min_slack_ns") or 0.0)
         max_area = self.options.get("max_area_um2")
@@ -188,7 +203,7 @@ class Step(AsicStep):
                    "area": "n/a" if not max_area else ("pass" if area.get("total_um2", 0) <= float(max_area) else "fail"),
                    "constraints": "fail" if viol else "pass"}
         verdict["overall"] = "fail" if "fail" in verdict.values() else "pass"
-        groups = dc.parse_groups(text("qor.rpt"), {c.name: c.period_ns for c in (sdc_cfg.clocks if sdc_cfg else [])})
+        groups = dc.parse_groups(text("qor.rpt"), {c.name: c.period_ns for c in (sdc_cfg.clocks if sdc_cfg else [])}, tscale)
         fmax = min((g["fmax_mhz"] for g in groups if g["fmax_mhz"]), default=None)  # the slowest clock limits what the design is good for
         memories = {}
         if plan.facts is not None:  # (the logic and the memories apart: the memory instances of the hierarchical area, a black box's estimate)
@@ -205,7 +220,7 @@ class Step(AsicStep):
             "tool": _version(res.log_path), "top": top, "library": libs, "status": "pass", "runtime_s": round(time.monotonic() - t0, 1),
             "log": project.rel(Path(res.log_path)), "netlist": project.rel(netlist), "svf": project.rel(work / f"{top}.svf"),
             "clocks": [{"name": c.name, "period_ns": c.period_ns, "freq_mhz": c.freq_mhz} for c in (sdc_cfg.clocks if sdc_cfg else [])],
-            "clock_override": overridden, "rtl_sha": hints.rtl_sha(project), "area": area, "timing": {**timing, **{k: v for k, v in qor.items() if k not in timing}, "fmax_mhz": fmax, "groups": groups}, "power": power,
+            "clock_override": overridden, "lib_time_scale": tscale, "rtl_sha": hints.rtl_sha(project), "area": area, "timing": {**timing, **{k: v for k, v in qor.items() if k not in timing}, "fmax_mhz": fmax, "groups": groups}, "power": power,
             "violation_count": len(viol), "violations": viol[:20], "check_design": checks, "unconstrained": unconstrained,
             "targets": {"min_slack_ns": min_slack, "max_area_um2": max_area}, "verdict": verdict})
         shutil.copy2(work / f"{top}.svf", self.asic_dir(engine) / "netlist" / f"{top}.svf") if (work / f"{top}.svf").is_file() else None

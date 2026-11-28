@@ -14,7 +14,7 @@ from pathlib import Path
 
 from q3tui.core.project import write_json
 from q3tui.eda import tools as toolmod
-from q3tui.flows.asic.lib import dc, pdks
+from q3tui.flows.asic.lib import dc, pdks, units
 from q3tui.flows.fpga.lib import hints
 from q3tui.flows.fpga.lib import sdc as sdcmod
 
@@ -60,6 +60,10 @@ def compute(ops) -> str:
     libs = step.libraries(eng)
     if not libs or any(not Path(x).is_file() for x in libs):
         raise EngineError("no library: set `library` (the .db of the standard cells) in Settings → asic_synth")
+    try:
+        tscale, cscale = units.scales(step.options)  # (a ps / fF library: FR-04)
+    except ValueError as exc:
+        raise EngineError(f"{exc} (Settings → asic_synth)") from exc
     tools = step.tools(eng)
     if not toolmod.available(tools, "asic_synth"):
         raise EngineError("the `asic_synth` tool (Design Compiler) was not found (module synopsys/syn; see `q3tui tools check`)")
@@ -77,7 +81,7 @@ def compute(ops) -> str:
     ran = used
     for _ in range(MAX_PROBES):
         ran = used
-        probe.write_text(probe_tcl(cfg, used))
+        probe.write_text(units.scale_sdc(probe_tcl(cfg, used), tscale, cscale))
         script.write_text(dc.script_text(step.rtl_files(eng), top, libs, probe, work, work / "net" / f"{top}.v", {**step.options, "compile": QUICK_COMPILE, "max_paths": 1}))
         for f in (*dc.REPORTS, "dc.out"):
             (work / f).unlink(missing_ok=True)
@@ -87,7 +91,7 @@ def compute(ops) -> str:
         if not res.ok or not (work / "qor.rpt").is_file():
             errs = "; ".join(d.message for d in res.errors[:3]) or "no report was written"
             raise EngineError(f"the estimate failed: {errs} (log: {res.log_path})")
-        groups = dc.parse_groups((work / "qor.rpt").read_text(errors="replace"), {c.name: used for c in cfg.clocks})
+        groups = dc.parse_groups((work / "qor.rpt").read_text(errors="replace"), {c.name: used for c in cfg.clocks}, tscale)
         if not groups:
             raise EngineError(f"the estimate found no clock path group (log: {res.log_path}): no register is clocked by a clock of the SDC")
         for g in groups:

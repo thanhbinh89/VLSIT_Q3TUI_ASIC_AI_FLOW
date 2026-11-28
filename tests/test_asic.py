@@ -186,6 +186,35 @@ def test_dc_reports():
     assert dc.phase_line("  Beginning Mapping Optimizations  (Medium effort)") and dc.phase_line("  0:01:08  230127.2  0.72") is None
 
 
+def test_library_units():
+    from q3tui.flows.asic.lib import units
+    assert units.scales({}) == (1.0, 1.0) and units.scales({"lib_time_unit": "ps", "lib_cap_unit": "fF"}) == (1000.0, 1000.0)
+    with pytest.raises(ValueError, match="lib_time_unit"):
+        units.scales({"lib_time_unit": "us"})
+    text = ("create_clock -name c -period 2.5 -waveform {0 1.25} [get_ports c]  ;# 400 MHz\n"
+            "set_clock_uncertainty -setup 0.1 [get_clocks c]\n"
+            "set_input_delay -clock [get_clocks c] -max 1.875 [get_ports {a b[3]}]  ;# 75% of 2.5 ns\n"
+            "  set_output_delay -clock [get_clocks c] -min 0 [get_ports q]\n"
+            "set_load 0.005 [all_outputs]\nset_max_fanout 32 [current_design]\n# 2.5 ns\nset_false_path -from [get_ports r]\n"
+            "set_max_transition 0.2 [current_design]")
+    out = units.scale_sdc(text, 1000.0, 1000.0).split("\n")
+    assert out[0] == "create_clock -name c -period 2500 -waveform {0 1250} [get_ports c]  ;# 400 MHz"
+    assert out[1] == "set_clock_uncertainty -setup 100 [get_clocks c]"
+    assert out[2] == "set_input_delay -clock [get_clocks c] -max 1875 [get_ports {a b[3]}]  ;# 75% of 2.5 ns"  # (bracketed words kept)
+    assert out[3] == "  set_output_delay -clock [get_clocks c] -min 0 [get_ports q]" and out[4] == "set_load 5 [all_outputs]"
+    assert out[5:8] == ["set_max_fanout 32 [current_design]", "# 2.5 ns", "set_false_path -from [get_ports r]"]  # (not a time)
+    assert out[8] == "set_max_transition 200 [current_design]" and units.scale_sdc(text, 1.0, 1.0) == text
+
+
+def test_dc_reports_of_a_ps_library():
+    t = dc.parse_timing("  data arrival time   2240.5\n  slack (MET)   12.0\n", 1000.0)
+    assert t["slack_ns"] == 0.012 and t["data_arrival_ns"] == 2.2405
+    q = dc.parse_qor("Timing Path Group 'c'\n Critical Path Slack: -61.0\n Critical Path Clk Period: 2500.00\n Total Negative Slack: -3200.0\n", 1000.0)
+    assert q["wns_ns"] == -0.061 and q["tns_ns"] == -3.2
+    g = dc.parse_groups("Timing Path Group 'c'\n Critical Path Slack: -61.0\n Critical Path Clk Period: 2500.00\n", None, 1000.0)
+    assert g[0]["period_ns"] == 2.5 and g[0]["slack_ns"] == -0.061 and g[0]["fmax_mhz"] == 390.5  # 1000 / (2.5 + 0.061)
+
+
 # -- Formality -----------------------------------------------------------------------------------------------------------------
 
 
@@ -195,6 +224,9 @@ def test_the_formality_script(tmp_path):
     t = fm.script_text([Path("/r/a.sv")], "blk", ["/l/x.db"], Path("/n/blk.v"), svf, tmp_path)
     assert t.index("set_svf") < t.index("read_sverilog") < t.index("set_top r:/WORK/blk") < t.index("read_verilog -container i -netlist") < t.index("match") < t.index("verify")
     assert "set_top i:/WORK/blk" in t and "Q3TUI_LEC_RESULT" in t
+    t = fm.script_text([Path("/r/a.sv")], "blk", ["/l/x.db"], Path("/n/blk.v"), svf, tmp_path,
+                       {"pre_tcl": ['set_app_var hdlin_interface_only "m_sram"'], "extra_tcl": ["set_constant i:/WORK/blk/t 0"]})
+    assert t.index("sh_continue_on_error") < t.index("hdlin_interface_only") < t.index("read_db") < t.index("set_constant") < t.index("match")
 
 
 def test_formality_results():
@@ -438,6 +470,19 @@ async def test_the_asic_has_its_own_clock(proj):
     assert s["timing"]["fmax_mhz"] == pytest.approx(1000 / (10.0 + 0.61), abs=0.1)  # the recorded -0.61 ns slack against a 10 ns period
     Ops(eng).run_action("sdc_set", key="clock.i_clk.asic_freq_mhz", value="")  # empty: the same as the FPGA's again
     assert sdc.load(proj).clocks[0].asic_freq_mhz is None
+
+
+async def test_a_ps_library_gets_a_scaled_sdc(proj):
+    _yaml(proj.root, extra="      lib_time_unit: ps\n      lib_cap_unit: fF\n")
+    eng = Engine(Project.open(proj.root))
+    await eng.run(yes=True, stop="asic_synth")
+    assert "-period 5000 " in (proj.root / "build" / "syn" / "asic" / "sdc" / "clocks.tcl").read_text()  # the ASIC copy, in ps
+    assert "-period 5 " in (proj.root / "constraints" / "sdc" / "clocks.tcl").read_text()  # the shared SDC (the FPGA's) is as it was
+    assert 'source -echo "' + str(proj.root / "build" / "syn" / "asic" / "sdc" / "sdc.tcl") in (proj.root / "build" / "syn" / "asic" / "synth.tcl").read_text()
+    s = json.loads((proj.schemas_dir / "asic_synth.json").read_text())
+    assert s["lib_time_scale"] == 1000.0 and s["timing"]["slack_ns"] == -0.0006 and s["clocks"][0]["period_ns"] == 5.0  # the recorded -0.61, in ps
+    _yaml(proj.root)
+    assert {v.name: v.status for v in Engine(Project.open(proj.root)).status()}["asic_synth"] == "stale"  # the unit is a hashed option
 
 
 async def test_only_the_asic_synthesis_goes_stale_on_an_asic_clock(proj):

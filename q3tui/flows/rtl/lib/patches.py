@@ -1,4 +1,4 @@
-"""Changes made to generated RTL (the modules the csr step's APB-CSR-Generator makes), kept so they outlive the next generation.
+"""Changes made to generated RTL (the modules the csr step's CSR generator makes), kept so they outlive the next generation.
 
 `src/rtl/csr/patches/<module>.patch` is every change made to the module since the tool made it: a unified diff from the tool's output to the file in
 src/rtl (the `rtl` step's lint fixes and change requests, edits by hand). `<module>.md` next to it says why, change by change. The tool's output itself
@@ -131,7 +131,7 @@ def unrecorded(project, rtl: Path, module: str) -> bool:
 def _note(rtl: Path, module: str, why: list[str]) -> None:
     p = notes_path(rtl, module)
     p.parent.mkdir(parents=True, exist_ok=True)
-    head = "" if p.is_file() else (f"# Changes to the generated `{module}`\n\n`{module}.patch` is every change made to the module since the APB-CSR-Generator made it; "
+    head = "" if p.is_file() else (f"# Changes to the generated `{module}`\n\n`{module}.patch` is every change made to the module since the CSR generator made it; "
                                    "the csr step applies it again whenever the tool makes the module again. Why, change by change:\n")
     with p.open("a") as out:
         out.write(head + f"\n## {datetime.now().isoformat(timespec='minutes')}\n" + "".join(f"- {w.strip()}\n" for w in why))

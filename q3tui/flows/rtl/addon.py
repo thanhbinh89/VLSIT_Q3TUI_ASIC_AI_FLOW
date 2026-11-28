@@ -29,16 +29,19 @@ def register(api) -> None:
 
     api.setting("rtl", "keep_generated", "Never edit generated RTL", "bool",
                 "Off (default): lint findings in the generated CSR module are fixed in place (name and ports kept); the fix stays "
-                "until the register map changes. On: they are only reported (the module stays as the APB-CSR-Generator made it).")
+                "until the register map changes. On: they are only reported (the module stays as the CSR generator made it).")
     api.setting("rtl", "child_projects", "Child projects (read-only RTL)", "lines",
                 "One project root per line, relative to this project or absolute. The files of each one's src/rtl/filelist.f are copied "
                 "unchanged into this project and are read-only here; a fix goes to that project.")
-    api.setting("csr", "mode", "CSR generation", "choice", "auto: generate the registers with the APB-CSR-Generator when the spec has software-visible registers; on: always; off: never.",
+    api.setting("csr", "mode", "CSR generation", "choice", "auto: generate the registers with the CSR generator when the spec has software-visible registers; on: always; off: never.",
                 (("auto", "auto — when the spec has registers"), ("on", "on — always"), ("off", "off — never")))
-    api.setting("csr", "tool_dir", "APB-CSR-Generator folder", "text", "Empty: $CSR_GEN_HOME, ~/.q3tui/tools/APB-CSR-Generator, <project>/tools/APB-CSR-Generator "
-                "(q3tui act csr_tool_install clones it).", nullable=True)
+    api.setting("csr", "tool_dir", "CSR generator folder", "text", "Empty: $CSR_GEN_HOME, ~/.q3tui/tools/CSR-Generator (or APB-CSR-Generator), "
+                "<project>/tools/ likewise (q3tui act csr_tool_install clones it).", nullable=True)
+    api.setting("csr", "protocol", "CSR bus", "choice", "The register block's bus for this project; empty: the spec says. AXI4-Lite and AHB-Lite need "
+                "the CSR generator 3.0 or later.", (("APB4", "APB4 completer"), ("AXI4-Lite", "AXI4-Lite subordinate"), ("AHB-Lite", "AHB-Lite subordinate")),
+                nullable=True)
 
-    @api.action("csr_tool_install", "Clone the APB-CSR-Generator (https://github.com/nguyenquanicd/APB-CSR-Generator) into ~/.q3tui/tools/APB-CSR-Generator, where the csr step "
+    @api.action("csr_tool_install", "Clone the CSR generator (https://github.com/nguyenquanicd/CSR-Generator) into ~/.q3tui/tools/CSR-Generator, where the csr step "
                 "looks for it. Q3TUI does not ship it.")
     def csr_tool_install(ops) -> str:
         import os
@@ -53,17 +56,17 @@ def register(api) -> None:
         role = toolmod.load_tools(ops.project.cfg, ops.project.root).roles.get("csr_gen")
         found = csr.find_tool(ops.project.root, None, (role.env or {}).get("CSR_GEN_HOME") if role else None)
         if found:
-            return ops._log("csr", f"the APB-CSR-Generator is already at {found}")
-        dest = Path(os.environ.get("Q3TUI_HOME") or "~/.q3tui").expanduser() / "tools" / "APB-CSR-Generator"
+            return ops._log("csr", f"the CSR generator is already at {found}")
+        dest = Path(os.environ.get("Q3TUI_HOME") or "~/.q3tui").expanduser() / "tools" / csr.FOLDERS[0]
         if dest.exists():
             raise EngineError(f"{dest} exists but is not the generator (no {', '.join(csr.missing(dest))}): remove it or set options.tool_dir")
         dest.parent.mkdir(parents=True, exist_ok=True)
         res = subprocess.run(["git", "clone", "--depth", "1", csr.REPO, str(dest)], capture_output=True, text=True, timeout=300)
         if res.returncode:
             raise EngineError("git clone failed: " + (res.stderr or res.stdout).strip()[-400:])
-        return ops._log("csr", f"the APB-CSR-Generator is installed at {dest}")
+        return ops._log("csr", f"the CSR generator is installed at {dest}")
 
-    @api.action("csr_show", "Show the register map the csr step drafted (src/rtl/csr/csr_map.json: registers, offsets, fields) and the ports of the module the APB-CSR-Generator made from it.")
+    @api.action("csr_show", "Show the register map the csr step drafted (src/rtl/csr/csr_map.json: bus, registers, offsets, fields) and the ports of the module the CSR generator made from it.")
     def csr_show(ops) -> str:
         from q3tui.core.project import read_json
 

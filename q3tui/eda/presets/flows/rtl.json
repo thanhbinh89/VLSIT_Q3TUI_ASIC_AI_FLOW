@@ -4,7 +4,7 @@
     "verible_lint": {"cmd": "verible-verilog-lint {args} {files}", "parse": "verible", "ok_returncodes": [0, 1], "modules": [], "timeout_s": 600,
                      "description": "Verible style / lint check of the RTL files with the flags Q3TUI wrote from the rules (src/rtl/style_lint/verible.flags)"},
     "csr_gen": {"cmd": "{python} {tool}/CSR_Generation.py {workbook} {sheet}", "parse": {"error": ["^Traceback", "Error:"], "warning": []}, "ok_returncodes": [0], "timeout_s": 300,
-                "description": "APB-CSR-Generator (https://github.com/nguyenquanicd/APB-CSR-Generator): reads the register-map workbook, writes RTL/<module>.sv, RTL/models/m_vlsi_synch.sv and Debug/debug.json into its working directory. {python} is Q3TUI's interpreter (it has openpyxl); {tool} is the generator's folder"},
+                "description": "CSR generator (https://github.com/nguyenquanicd/CSR-Generator, named APB-CSR-Generator before 3.0): reads the register-map workbook, writes RTL/<module>.sv, its models (RTL/models/m_csr_sync.sv; from 3.0 for AXI4-Lite / AHB-Lite also m_csr_sync_fifo.sv, m_csr_async_fifo.sv), RTL/filelist.f (3.0) and Debug/debug.json into its working directory. {python} is Q3TUI's interpreter (it has openpyxl); {tool} is the generator's folder. Generator 3.5 or later takes --vlsit-style (VLSIT RTL rule formatting)"},
     "verible_format": {"cmd": "verible-verilog-format {args} {files}", "parse": "verible", "ok_returncodes": [0], "modules": [], "timeout_s": 600,
                        "description": "Verible formatter; --inplace rewrites the files (whitespace only)"}
   }

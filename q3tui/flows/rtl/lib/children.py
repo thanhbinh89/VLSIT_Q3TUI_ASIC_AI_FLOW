@@ -356,8 +356,8 @@ def _owner_of(base: Path, child: Child, f: Path, sha: str, owners: dict, warning
 
 def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, dict], own: set[str]) -> bool:
     """R8 against this project's own modules. A unit it makes itself (the csr step's) that its file here has with the child's very bytes is no
-    clash, and stays this project's (True): the APB-CSR-Generator's synchronizer model has the tool's name, so a parent and a child with an
-    asynchronous CSR both have it. With other bytes it stops the copy naming both files (one design holds one `unit`). So does a file of the
+    clash, and stays this project's (True): the CSR generator's models (its synchronizer, its AXI4-Lite / AHB-Lite queues) have the tool's names,
+    so a parent and a child with a CSR both have them. With other bytes it stops the copy naming both files (one design holds one `unit`). So does a file of the
     unit's name here that is not a recorded copy: this project's own module, or an earlier copy the registry no longer names (it was deleted,
     damaged, and the child moved on since), which only you can tell apart. One with the child's very bytes is no clash: it becomes the copy
     (False)."""
@@ -367,10 +367,10 @@ def _check_here(project, rtl_dir: Path, unit: str, entry: dict, old: dict[str, d
             return True
         from q3tui.flows.rtl.lib import csr
 
-        what = ("the APB-CSR-Generator's synchronizer model, made here by the csr step" if unit in csr.SYNC_MODELS
-                else "made here by the csr step, with the APB-CSR-Generator")
+        what = ("the CSR generator's model, made here by the csr step" if unit in csr.MODELS
+                else "made here by the csr step, with the CSR generator")
         raise ChildError(f"`{unit}` of the child project {entry['owner']} ({entry['source']}) is not the same file as this project's own "
-                         f"{project.rel(mine)} ({what}): both projects must use the same APB-CSR-Generator version, or rename one of them")
+                         f"{project.rel(mine)} ({what}): both projects must use the same CSR generator version, or rename one of them")
     copy_here = (old.get(unit) or {}).get("file")
     clash = [f for f in dict.fromkeys((rtl_dir / entry["file"], rtl_dir / f"{unit}.sv"))
              if f.is_file() and f.name != copy_here and not (f.name == entry["file"] and sha256_file(f) == entry["sha256"])]
