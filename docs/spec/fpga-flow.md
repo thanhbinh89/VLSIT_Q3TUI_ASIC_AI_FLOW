@@ -167,9 +167,34 @@ pick list is the judge's ways to a real result, its recommendation first (the de
 result as a missed target and your answer as a settled decision. Without credentials the result is "not judged", with a warning. The synthesis
 log is copied beside the reports (`build/syn/fpga/reports/synth.log`: `.q3tui/` is hidden from you and the assistant).
 
+**A tool that could not run is no design problem.** A synthesis that failed goes to `fpga_port` as a change request, except when Vivado could not
+check out its licence (`ERROR: [Common 17-345] A valid license was not found …`, `Common 17-348`): the step fails with that line, nothing goes to
+`fpga_port`, and the next run synthesizes again (no `--regenerate`).
+
 **The device.** The project flow's **FPGA** step (docs/spec/project-flow.md) lists the devices the families synthesize, yours
 (`config/fpgas.json`) and the parts your spec names, and sets the one in use (`fpga_synth`'s `part`); it warns when the spec names
 another part, or one no family here synthesizes.
+
+## Memories (`fpga_synth`, `timing_util_report`)
+
+A design whose memories are wrapper modules keeps only a behavioural body of each in `src/rtl/` (the reference of rtl, dv and sanity); its real
+body depends on the target, and a behavioural body no tool maps to RAM (a bit-masked write loop, two write ports in one process) becomes
+registers: FX1B's `ddrc_fe` (eight wrappers, 272 kbit) took Vivado past 54 GB and never finished. `lib/memories.py`, shared with the ASIC flow:
+
+| Setting | What it does |
+|---|---|
+| `project.memory_modules` (q3tui.yaml) | names or shell patterns (`m_*_sram_*`) of the memory modules (never the top). Unset: Q3TUI proposes the modules that hold an unpacked array of `min_mem_words` words or more (asic_port's option and `memory_array` rule, 16 unless set; read in every flow, part of the synthesis steps' staleness when set). The reports give them apart from the logic; the sanity flow black-boxes them |
+| `fpga_synth.bodies` | `{module: file}` (or `module=file` lines in Settings): this flow reads the file instead of the RTL file that defines the module (an FPGA body that infers block / distributed RAM, in `src/fpga/` or anywhere). The file must define the module; the RTL file it replaces must define nothing else |
+| `fpga_synth.blackbox` | module names or patterns (`true`: every memory module): a port-only stub (`build/syn/fpga/stubs/<module>.sv`: the module's header as written — its parameters size its ports for every instance — with `(* black_box *)`, `(* blackbox *)` for Yosys; the RTL with the stubs must elaborate, else nothing is run) is read instead, so utilization and timing cover the logic only. Vivado times no pin of a black box (`Constraints 18-472` refuses an input / output delay on one): paths into and out of them are not timed, and the report says so (`blackbox_timing`, the ASIC's, is not applied here: a warning says it). Not with Quartus (give a body) |
+| `fpga_synth.max_register_kbit` | default 64 (1 kbit = 1024 bits), 0: no limit. Vivado says when it builds a RAM from registers (`Synth 8-4767 … Trying to implement RAM '<name>' in registers`, seconds into the synthesis): when the arrays it may mean — the ones of that name, or every array outside the black boxes when it names none — hold more, it is stopped with the arrays, their size and these settings; nothing goes to fpga_port |
+
+Without these settings the script and the files read are as before. A body, a black box or the limit changes the result (they are hashed
+options; `project.memory_modules` too). `schemas/fpga_synth.json` records `memories` (the modules, `proposed`, the bodies, the black boxes, every
+memory instance with its bits — the RTL's, at that instance's parameters —, and the files read when any is set); `schemas/ppa_report.json`
+adds `memory` (per instance: mode `rtl` / `body` / `blackbox`, bits, and from `utilization_hier.rpt` its LUTs, LUTRAM, FFs, RAMB36 / RAMB18;
+their sums; `design_lut_ram`, `design_bram_tile`: every memory resource of the design; `black_boxes`) and `logic` (the LUTs and FFs outside the
+memory instances). An instance Vivado merged into its parent is `reported: false` and counts in the logic. The totals (`utilization`) are as
+before. The plausibility judge reads the files the tool read (a stub declares no memory).
 
 ## PPA optimization
 
@@ -216,5 +241,5 @@ Gowin, UltraScale+ and Versal families (the part name is recognized and refused 
 ## Where the code is
 
 All of it under `q3tui/flows/fpga/`: `FLOW.md`, one folder per step (`step.py`, `md/skill.md`), `lib/` (SDC model and renderer, Vivado script and
-report parsers, the port's scan / memory images / tools in `port.py`, step base), `skills/fpga-port/` (the porter's playbook), `addon.py` (actions), `panels.py` (TUI). Core has only the generic add-on hooks and the
-`vivado` log parser.
+report parsers, the port's scan / memory images / tools in `port.py`, the memory modules in `memories.py`, step base), `skills/fpga-port/` (the porter's playbook), `addon.py` (actions), `panels.py` (TUI). Core has only the generic add-on hooks, the
+`vivado` log parser and the memory facts (`q3tui/hdl/memories.py`: every instance's arrays at its parameters, read with pyslang).

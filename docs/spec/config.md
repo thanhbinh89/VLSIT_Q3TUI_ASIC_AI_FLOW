@@ -64,6 +64,10 @@ project:                          # folder names inside the project (docs/spec/p
   req_dir: req                    # req, arch, model: team-mode role folders (NOTES.md) and independence deny lists
   arch_dir: arch
   model_dir: model
+  memory_modules: []              # the memory-wrapper modules (names or patterns: m_*_sram_*): black boxes of the sanity analysis, given
+                                  # apart from the logic by fpga / asic, which can give them a body or make them black boxes
+                                  # (docs/spec/fpga-flow.md "Memories"); unset: the modules with an array of asic_port's min_mem_words
+                                  # (16) words or more are proposed
 
 pipeline:
   flow: spec                      # the flow: a name (built-in `spec` / `rtl` / `example`, or a file / folder in <project>/flows/ or

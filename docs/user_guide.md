@@ -118,8 +118,9 @@ The ASIC flow finds the `.db` libraries through a catalog (`q3tui/flows/asic/pdk
 export PDK_ROOT=/path/to/your/pdks     # e.g. $PDK_ROOT/GF180/…, $PDK_ROOT/FreePDK45/…
 ```
 
-Your own technologies go in `<project>/config/pdks.json` (same format; an entry with the same `id` replaces the built-in one). Or give
-the synthesis step its library directly: Settings (`,` on `asic_synth` → Library), or in `q3tui.yaml`:
+Your own technologies go in `<project>/config/pdks.json` (same format; an entry with the same `id` replaces the built-in one). An entry
+may also give `sram_um2_per_bit` (the area of one SRAM bit: a black-boxed memory's area estimate) and `nand2_um2` (the NAND2 gate's area:
+area as NAND2 equivalents). Or give the synthesis step its library directly: Settings (`,` on `asic_synth` → Library), or in `q3tui.yaml`:
 
 ```yaml
 pipeline:
@@ -224,6 +225,28 @@ spec ─► parse ─► config
   A missing tool fails the step ("not run"); it never passes.
 - **`fpga`** / **`asic`** take the RTL (read only) and estimate or synthesize it. The two share `constraints/sdc/`; a fix that
   would change the RTL goes back to the rtl flow as a change request.
+
+### Memories (fpga, asic, sanity)
+
+When your memories are wrapper modules whose `src/rtl/` body is behavioural (a simulation model no tool maps to RAM), name them and say what
+each synthesis reads instead:
+
+```yaml
+project:
+  memory_modules: [m_x_sram_dp, m_x_sram_tp]       # or patterns: m_*_sram_*; unset: modules with an array of asic_port.min_mem_words (16) words or more
+pipeline:
+  step_options:
+    fpga_synth:
+      bodies: {m_x_sram_dp: src/fpga/m_x_sram_dp.sv, m_x_sram_tp: src/fpga/m_x_sram_tp.sv}   # an FPGA body that infers RAM
+    asic_synth:
+      blackbox: [m_x_sram_dp, m_x_sram_tp]          # or true: every memory module; asic_lec black-boxes them too
+      blackbox_timing: {"*": {clock: i_clk, access_pct: 40, setup_pct: 25}}   # clock: the SDC clock of their pins
+```
+
+`src/rtl/` is not changed: rtl, dv and sanity keep using it (sanity black-boxes the memory modules). The reports give the logic and the
+memories apart (`schemas/ppa_report.json`, `schemas/asic_synth.json`: `memory`, `logic`; a black box's ASIC area is estimated from
+`sram_um2_per_bit` of your PDK entry). A synthesis about to build more than 64 kbit of arrays from registers is stopped with what to set
+(`max_register_kbit`, 0: no limit). docs/spec/fpga-flow.md and docs/spec/asic-flow.md, "Memories".
 
 **Updates, not re-runs:** editing a requirement, a parameter, or asking for a change re-runs only what that
 change actually affects — earlier steps and your existing approvals are untouched unless the change reaches

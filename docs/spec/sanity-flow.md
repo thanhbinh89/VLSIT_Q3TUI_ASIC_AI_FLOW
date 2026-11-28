@@ -193,6 +193,11 @@ their ports take part. For big memories (an array of flops with no reset, a RAM 
 machine and crashed it. It is part of the step's staleness (the analysis, the waiver review and the check run again), and it is an option the tool
 fix may set (`tool_fix_options`: an unattended run's `tool_fix` and the TUI's assistant are told, with the memory the tool needed before).
 
+The project's memory modules (`project.memory_modules`, names or patterns, never the top: the list the fpga and asic flows read, docs/spec/fpga-flow.md
+"Memories") are black boxes of both analyses too, besides the setup's and yours: the setup's prompt names them, their pins are constrained
+like the setup's black boxes (`blackbox_pins`: the clock the setup gives, or the design's only one), and the list is part of the staleness of
+the setup and of both analyses when it is set.
+
 ## The setup (`setup`)
 
 The quality of the setup decides the quality of the analysis: a missing reset or quasi-static signal gives false violations, a wrong one hides a

@@ -81,6 +81,31 @@ Equivalent → done. Not equivalent, inconclusive or no verdict is a failed step
 `build/syn/asic/reports/lec.rpt`). When Formality refuses to link the RTL on an interpretation message (for example `FMR_ELAB-147`, an index that
 may leave an array), the step names the message: fix the RTL, or accept it with `options.message_filter: [FMR_ELAB-147]`.
 
+## Memories (`asic_synth`, `asic_lec`)
+
+Design Compiler builds every array from flip-flops: FX1B's `ddrc_fe` (eight memory wrappers, 272 kbit) became 3,359 kGE of which 88 % were the
+arrays, and 280,833 of its 302,646 violating endpoints started or ended in them. The memory modules are the FPGA flow's (docs/spec/fpga-flow.md
+"Memories": `project.memory_modules`, else the modules with an unpacked array of 16 words or more), with asic_synth's own settings:
+
+| Setting | What it does |
+|---|---|
+| `asic_synth.bodies` | `{module: file}` (or `module=file` lines): Design Compiler reads the file instead of the RTL file that defines the module (an ASIC body: a macro wrapper, a stand-in) |
+| `asic_synth.blackbox` | names or patterns (`true`: every memory module): a port-only stub (`build/syn/asic/stubs/<module>.sv`) is read and kept as it is (`set_dont_touch`, `set_boundary_optimization false` on its cells, found by their design name `m`, `m_PARA…`, `m_…_3` and not a longer module's): area, timing and power are the logic's. An unresolved module would not do: Design Compiler gives it no pins, and Formality refuses one whose instances differ in width |
+| `asic_synth.blackbox_timing` | `{<module> or "*": {clock, access_pct, setup_pct}}`: a black box's data pins (not its clock / reset ports) are timed against the clock (the design's first when none is named): its inputs needed `setup_pct` % of the period before the edge (`set_output_delay`), its outputs valid `access_pct` % after it (`set_input_delay`); the delays come from the clock's own period (`get_attribute … period`). Without it the pins are not timed |
+| `asic_synth.max_register_kbit` | default 64 (1 kbit = 1024 bits), 0: no limit. The arrays outside the black boxes (a body's own arrays count) holding more stop the step before Design Compiler runs, with the arrays, their size and these settings |
+
+With `project.memory_modules` set or a body / black box, the memory instances are not ungrouped (`set_ungroup … false`), so their area stays
+their own in the hierarchical report; without any of them the script is as before. `schemas/asic_synth.json` adds `memories` (as the FPGA's),
+`memory` (per instance: mode, bits, `area_um2` from `report_area -hierarchy` — or, for a black box, bits × the `sram_um2_per_bit` of the
+library's entry in `pdks.json`, `estimate: true` —, `measured_um2`, `estimated_um2`, `black_boxes` with their timing model), `logic` (`area_um2`:
+the total less the memory instances measured; `nand2_eq` with the entry's `nand2_um2`) and `area_with_memory_um2` (the total plus the
+estimates). `area` and the verdict are as before. An instance ungrouped into its parent is `reported: false` and counts in the logic.
+
+`asic_lec` takes asic_synth's bodies and black boxes: the reference reads the same files, and a black box is one on both sides
+(`hdlin_interface_only` with the module before the RTL is read, with its uniquified designs of the netlist before the netlist is read): its pins
+are compare points, matched by name. A macro `.db` in the library list is not handled here yet (the macro instantiated by the RTL, timed by its
+own library).
+
 ## Tools
 
 Template roles (`q3tui/eda/presets/flows/asic.json`, copied into the project's `config/tools.json` by `q3tui tools init`): `asic_synth` = `dc_shell -f {script}` with
@@ -96,4 +121,4 @@ tools (Genus, Yosys), multiple corners.
 
 All of it under `q3tui/flows/asic/`: `FLOW.md`, one folder per step (`step.py`, `md/skill.md`), `lib/` (port rules, Design Compiler script and
 report readers, Formality script and reader), `addon.py` (settings, `asic_handoff`, the SDC actions), `panels.py` (TUI). The SDC
-step, its actions and its editor are the FPGA flow's. Core has only the flow-map box.
+step, its actions and its editor are the FPGA flow's, and so are the memory modules (`q3tui/flows/fpga/lib/memories.py`). Core has only the flow-map box.

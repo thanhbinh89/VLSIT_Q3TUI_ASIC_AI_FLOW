@@ -44,7 +44,8 @@ How every step follows it:
    step they belong to").
 6. **Review.** An update whose result is unchanged keeps the approval; a real change
    reopens the review of that step (the changed parts are listed in the log).
-7. **New checks re-check old results.** A step's `checks_version` is part of its inputs
+7. **New checks re-check old results.** A step's `checks_version` (and what its `extra_hash` returns: settings outside its options, such as
+   `project.memory_modules`) is part of its inputs
    hash; bumping it (when Q3TUI's checks on that step's result change) makes its done
    result stale. The re-run changes nothing by itself (no LLM); if the result now fails a
    check it is repaired, and only the repair propagates.
