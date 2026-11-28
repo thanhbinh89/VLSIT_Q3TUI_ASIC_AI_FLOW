@@ -40,6 +40,16 @@ def script_text(files: list[Path], top: str, sdc_dir: Path, workdir: Path, optio
     return "\n".join(lines) + "\n"
 
 
+_LICENSE = re.compile(r"^\s*ERROR:\s*\[Common 17-(?:345|348)\][^\n]*", re.M)
+
+
+def license_error(log: str) -> str | None:
+    """The line of a Vivado log that says it got no licence for the synthesis or the device (`Common 17-345` / `17-348`), else None: a
+    problem of the tool's setup, never of the design."""
+    m = _LICENSE.search(log or "")
+    return m.group(0).strip()[:300] if m else None
+
+
 # -- reports -------------------------------------------------------------------------------------------------------
 
 _ROW = re.compile(r"^\|\s*(?P<name>[^|]+?)\s*\|\s*(?P<used>[\d.]+)\s*\|\s*(?P<fixed>[\d.]+)\s*\|(?:\s*(?P<prohibited>[\d.]+)\s*\|)?\s*(?P<avail>[\d.]+)\s*\|\s*(?P<pct>[\d.<>=]+)\s*\|")

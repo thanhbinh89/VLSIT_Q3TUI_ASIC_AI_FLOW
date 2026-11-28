@@ -10,7 +10,8 @@ step, never a pass.
 Every other problem goes back to `fpga_port` (the step that makes the RTL ready for the part): a synthesis the tool failed (its error
 lines), a memory initialization file the tool would read and is not there (said before the tool runs), a part whose family the port has
 not ported for. The step hands it over as a change request and the fix loop runs `fpga_port`, then the synthesis again, at most
-`max_rounds` times in a run (`pipeline.max_fix_iterations`); `schemas/fpga_synth.json` says `failed` meanwhile.
+`max_rounds` times in a run (`pipeline.max_fix_iterations`); `schemas/fpga_synth.json` says `failed` meanwhile. A tool that could not
+run (Vivado without its licence: `Common 17-345`) is a failed step, not a design's problem: nothing goes to fpga_port.
 
 Memory modules (lib/memories.py, docs/spec/fpga-flow.md "Memories"): `options.bodies` gives a module a target body (the file is read
 instead of the RTL's), `options.blackbox` makes it a black box (a port-only stub); with Vivado, a synthesis that builds more than
@@ -271,6 +272,14 @@ class Step(FpgaStep):
             raise StepFailed(f"FPGA synthesis stopped: {guard.reason}")
         toolmod.check_broken(res, "fpga_synth")
         if not res.ok:
+            log = Path(res.log_path).read_text(errors="replace") if res.log_path and Path(res.log_path).is_file() else ""
+            lic = vivado.license_error(log)
+            if lic:  # (the tool could not run: the step fails, nothing goes to fpga_port, the next run synthesizes again)
+                rep = self.reports_dir(engine)
+                rep.mkdir(parents=True, exist_ok=True)
+                (rep / "synth.log").write_text(log)
+                raise StepFailed(f"Vivado got no licence ({lic}): a problem of the tool's setup, not of the design — run again when the licence "
+                                 f"is there (log: {project.rel(rep / 'synth.log')})")
             raise self._failed(engine, res, "synthesis failed")
         rep = self.reports_dir(engine)
         rep.mkdir(parents=True, exist_ok=True)
