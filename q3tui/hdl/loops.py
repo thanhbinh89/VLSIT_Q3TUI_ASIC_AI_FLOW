@@ -6,6 +6,13 @@ The graph is per signal (not per bit), over the flattened hierarchy: an edge `x 
 computed combinationally from x (a read in the right-hand side, or in an enclosing if / case
 condition). Registers (always_ff, edge-triggered always) break the loop. A signal feeding itself
 (`v[1] = v[0]`) is ignored: that is almost always different bits of one vector.
+
+What an assignment writes is the variables its left side names (`_lhs`), not the expressions that
+only select where it writes: in `v[idx] = x` and `v[hi:lo] = x` the target is `v`; `idx`, `hi`, `lo`
+are sources of the edge, like the right side (`_lhs_index_reads`), at any depth of a member access
+or a concatenation. A register used as the index (`w_valid_nxt[reg_alloc_ptr] = 1'b1` under
+`if (w_take)`) is no target, so no loop closes through it; an index computed combinationally from
+the vector it selects into (`idx = f(v); v[idx] = x`) is still the loop `v → idx → v`.
 """
 
 from __future__ import annotations
@@ -42,8 +49,37 @@ def _reads(expr) -> set:
 
 
 def _lhs(expr) -> set:
-    """Signals written by an assignment's left side (selects and concatenations included)."""
-    return _reads(expr)
+    """Signals written by an assignment's left side: the variables it names, through selects, member accesses and concatenations —
+    not the index / range expressions of its selects (those only say where it writes: `_lhs_index_reads`)."""
+    out: set = set()
+    if expr is None:
+        return out
+    E = ast.ExpressionKind
+
+    def walk(e) -> None:
+        k = e.kind
+        if k in (E.NamedValue, E.HierarchicalValue):
+            sym = e.symbol
+            if sym is not None and sym.kind in (ast.SymbolKind.Variable, ast.SymbolKind.Net):
+                out.add(sym)
+        elif k in (E.ElementSelect, E.RangeSelect, E.MemberAccess):
+            walk(e.value)
+        elif k == E.Concatenation:
+            for op in e.operands:
+                walk(op)
+        elif k == E.Streaming:  # ({>>{a, b}} = …: the operands are written)
+            streams = [s for s in getattr(e, "streams", None) or () if getattr(s, "operand", None) is not None]
+            for s in streams:
+                walk(s.operand)
+            if not streams:
+                out.update(_reads(e))
+        elif k == E.Conversion:
+            walk(e.operand)
+        else:  # (anything else on a left side: what it names, conservatively)
+            out.update(_reads(e))
+
+    walk(expr)
+    return out
 
 
 def _lhs_index_reads(expr) -> set:
@@ -184,8 +220,8 @@ def _instance(g: _Graph, inst, depth: int = 0) -> None:
             if d == "In":
                 g.add(_reads(expr), {inner}, child.location)
             elif d == "Out":
-                outer = _lhs(expr.left) if expr.kind == ast.ExpressionKind.Assignment else _reads(expr)
-                g.add({inner}, outer, child.location)
+                left = expr.left if expr.kind == ast.ExpressionKind.Assignment else expr
+                g.add({inner} | _lhs_index_reads(left), _lhs(left), child.location)  # (.o(v[idx]): v is written, idx says where)
         if depth < 64:
             _instance(g, child, depth + 1)
 
