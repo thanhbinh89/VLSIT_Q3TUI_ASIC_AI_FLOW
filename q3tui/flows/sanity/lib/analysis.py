@@ -38,6 +38,7 @@ def rtl_resets(filelist: Path, root: Path, top: str) -> list[str]:
 
 class AnalysisStep(SanityStep):
     hashed_options = ("extra_tcl", "resets", "blackbox")  # (staleness: these change the result)
+    uses_memory_modules = True  # (project.memory_modules are black boxes too)
     tool_fix_options = {
         "blackbox": "modules (a list of names) VC Static treats as black boxes: set_blackbox before analyze. For big memories (an array of flops with no reset, "
                     "a RAM model): only their ports matter for crossings, and their arrays can take the analysis past the machine's memory. The "
@@ -83,8 +84,9 @@ class AnalysisStep(SanityStep):
         elif opts.get("resets"):
             sdcj = {**sdcj, "resets": [str(r) for r in opts["resets"]]}
         resets = None if opts.get("resets") else setupmod.reset_lines(plan)  # (your option wins; else the setup's, else the SDC's)
+        yours = [*setupmod.blackbox_modules(None, opts.get("blackbox")), *self.memory_blackboxes(engine)]  # (your option's, the project's memory modules)
         return script.text(self.role, top, root, script.absolute_filelist(self.filelist(engine), root, work), work, self.sdc_top(engine), sdcj, str(opts.get("extra_tcl") or ""), waive,
-                           setupmod.blackbox_modules(plan, opts.get("blackbox")), resets, setupmod.tcl(plan, self.role))
+                           setupmod.blackbox_modules(plan, yours), resets, setupmod.tcl(plan, self.role))
 
     async def run(self, ctx: StepContext) -> None:
         engine, project, role = ctx.engine, ctx.project, self.role

@@ -25,6 +25,7 @@ class Step(SanityStep):
     role = "cdc"  # (the dry run elaborates with the `cdc` tool role)
     checks_version = 1  # (1: the black boxes' pins are constrained on their clock)
     tool_roles = ()
+    uses_memory_modules = True  # (project.memory_modules: black boxes whose pins it constrains)
 
     def inputs(self, engine) -> list[Path]:
         return [self.filelist(engine), *self.rtl_files(engine), *self.sdc_files(engine), *engine.project.spec_documents()]
@@ -63,6 +64,10 @@ class Step(SanityStep):
         if arr:
             lines.append("Unpacked arrays per module (candidates for black boxes when they are memories with no reset):")
             lines += [f"- {m}: {', '.join(a)}" for m, a in arr.items()]
+        mem = self.memory_blackboxes(engine)
+        if mem:
+            lines.append(f"The project's memory modules (project.memory_modules), black boxes of both analyses whatever you decide; say the clock "
+                         f"of their pins in `blackbox` when the design has several: {', '.join(mem)}")
         try:
             from q3tui.eda import tools as toolmod
 
@@ -120,6 +125,7 @@ class Step(SanityStep):
         """The setup as data with what code adds: the SDC clocks, the black boxes' instances and data pins (yours, options.blackbox, too)."""
         data = plan.model_dump()
         yours = [m for st in ("cdc", "rdc") if st in engine.by_name for m in setupmod.blackbox_modules(None, engine.by_name[st].options.get("blackbox"))]
+        yours += self.memory_blackboxes(engine)  # (project.memory_modules: black boxes of every analysis)
         data["clocks"] = clocks
         data["blackbox_pins"] = setupmod.blackbox_pins(des, top, list(dict.fromkeys([b.module for b in plan.blackbox] + yours)))
         return data

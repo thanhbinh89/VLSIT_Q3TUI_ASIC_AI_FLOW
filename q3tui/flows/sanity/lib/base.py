@@ -46,6 +46,14 @@ class SanityStep(FpgaStep):
         """The violation table (Markdown for reading, CSV for a spreadsheet)."""
         return [engine.project.reports_dir / f"{self.role}_report.{ext}" for ext in ("md", "csv")]
 
+    def memory_blackboxes(self, engine) -> list[str]:
+        """The RTL modules `project.memory_modules` names (names or patterns): black boxes of every analysis, only their ports matter."""
+        import fnmatch
+
+        pats = self.memory_modules(engine)
+        top = self.top(engine) if pats else None
+        return [f.stem for f in self.rtl_files(engine) if f.stem != top and any(fnmatch.fnmatchcase(f.stem, p) for p in pats)] if pats else []
+
     def rtl_hash(self, engine) -> str:
         return sha256_json({f.name: f.read_text(errors="replace") for f in self.rtl_files(engine)})[:12]
 
