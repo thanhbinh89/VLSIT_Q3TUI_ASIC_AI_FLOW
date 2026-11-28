@@ -109,6 +109,13 @@ def register(api) -> None:
                 "fpga_port in one run before it is asked here; empty: pipeline.max_fix_iterations.", nullable=True)
     api.setting("fpga_synth", "synth_args", "Extra synthesis arguments", "lines",
                 "One per line, added to the synthesis command (Vivado synth_design: -flatten_hierarchy full; Yosys synth_ecp5 / synth_ice40: -abc9).")
+    # memory modules (lib/memories.py, docs/spec/fpga-flow.md "Memories"): a target body or a black box, the register limit
+    api.setting("fpga_synth", "bodies", "Memory bodies", "lines", "module=file, one per line: the FPGA flow reads that file instead of the RTL file "
+                "that defines the module (an FPGA body that infers block / distributed RAM); src/rtl stays the reference of rtl, dv and sanity.")
+    api.setting("fpga_synth", "blackbox", "Memory black boxes", "lines", "Module names or patterns, one per line (true: every memory module): "
+                "a port-only stub is read instead, so the utilization and timing cover the logic only (Vivado times no pin of a black box).")
+    api.setting("fpga_synth", "max_register_kbit", "Max memory from registers (kbit)", "int", "Vivado saying it builds a RAM from registers "
+                "while the design's arrays outside bodies / black boxes hold more than this stops the synthesis (default 64; 0: no limit).", nullable=True)
     # the ASIC library: the ASIC flow's own option, here too (the estimate and the SDC tab use it; one choice for both flows)
     api.setting("asic_synth", "library", "ASIC library (.db)", "text",
                 "The standard-cell library of the ASIC flow (a .db; one per corner in a PDK folder): the quick Fmax estimate and the ASIC synthesis use it. "

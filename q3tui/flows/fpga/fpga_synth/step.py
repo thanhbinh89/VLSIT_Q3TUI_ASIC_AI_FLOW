@@ -10,7 +10,11 @@ step, never a pass.
 Every other problem goes back to `fpga_port` (the step that makes the RTL ready for the part): a synthesis the tool failed (its error
 lines), a memory initialization file the tool would read and is not there (said before the tool runs), a part whose family the port has
 not ported for. The step hands it over as a change request and the fix loop runs `fpga_port`, then the synthesis again, at most
-`max_rounds` times in a run (`pipeline.max_fix_iterations`); `schemas/fpga_synth.json` says `failed` meanwhile."""
+`max_rounds` times in a run (`pipeline.max_fix_iterations`); `schemas/fpga_synth.json` says `failed` meanwhile.
+
+Memory modules (lib/memories.py, docs/spec/fpga-flow.md "Memories"): `options.bodies` gives a module a target body (the file is read
+instead of the RTL's), `options.blackbox` makes it a black box (a port-only stub); with Vivado, a synthesis that builds more than
+`options.max_register_kbit` of arrays from registers (Synth 8-4767) is stopped with what to set."""
 
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ import anyio
 from q3tui.eda import tools as toolmod
 from q3tui.eda.base import ToolUnavailable
 from q3tui.pipeline.base import StepContext, StepFailed
+from q3tui.flows.fpga.lib import memories as memmod
 from q3tui.flows.fpga.lib import oss, quartus, vivado
 from q3tui.flows.fpga.lib import port as portmod
 from q3tui.flows.fpga.lib import sdc as sdcmod
@@ -65,12 +70,40 @@ class Step(FpgaStep):
     title = "FPGA synthesis"
     deps = ("sdc", "fpga_port")
     tool_roles = ("fpga_synth", "fpga_yosys", "fpga_pnr_ecp5", "fpga_pnr_ice40", "fpga_quartus_pro", "fpga_quartus_std")
-    hashed_options = ("template", "part", "package", "speed", "fpga", "frontend", "defines", "synth_args", "implement")  # (staleness: these change the result)
+    hashed_options = ("template", "part", "package", "speed", "fpga", "frontend", "defines", "synth_args", "implement",
+                      "bodies", "blackbox", "blackbox_timing", "max_register_kbit")  # (staleness: these change the result)
+    uses_memory_modules = True
+    uses_min_mem_words = True
 
     def inputs(self, engine) -> list[Path]:
         d = engine.project.fpga_src_dir  # (fpga_port's: the memory images; its report: what it ported for)
+        own = sorted(p for p in d.rglob("*") if p.is_file()) if d.is_dir() else []
         return [self.filelist(engine), *self.rtl_files(engine), *self.sdc_inputs(engine), self.artifact(engine, portmod.PORT_JSON),
-                *(sorted(p for p in d.rglob("*") if p.is_file()) if d.is_dir() else [])]
+                *own, *(f for f in self.body_files(engine) if f not in own)]
+
+    def memory_plan(self, engine, backend: str) -> tuple[memmod.Plan, object]:
+        """(the memory plan, the design as the tool reads it) for `backend` (lib/memories.py); PlanError when a setting cannot be applied."""
+        if backend == "quartus" and memmod.option_blackbox(self.options.get("blackbox")):
+            raise memmod.PlanError("black boxes are not supported with Quartus here: give the memory modules a body (options.bodies)")
+        memmod.max_register_bits(self.options)  # (a bad value is said now)
+        attr = {"vivado": memmod.VIVADO_BLACK_BOX, "yosys": memmod.YOSYS_BLACK_BOX}.get(backend)
+        top = self.top(engine)
+        plan = memmod.make_plan(engine.project, self.options, self.rtl_files(engine), top, engine.project.fpga_dir / "stubs", attr,
+                                min_words=self.min_mem_words(engine))
+        if plan.bodies:
+            from q3tui.hdl import memories as hdlmem
+
+            return plan, hdlmem.scan(plan.files, top)
+        return plan, plan.facts
+
+    def _memories(self, engine, plan: memmod.Plan) -> dict:
+        """The `memories` record of schemas/fpga_synth.json (timing_util_report gives them apart from the logic)."""
+        if plan.facts is None:
+            return {}
+        data = plan.summary(engine.project)
+        if plan.active:
+            data["files"] = [engine.project.rel(f) for f in plan.files]
+        return {"memories": data}
 
     def outputs(self, engine) -> list[Path]:
         rep = self.reports_dir(engine)
@@ -94,19 +127,28 @@ class Step(FpgaStep):
             raise StepFailed(f"FPGA synthesis not run: {exc}") from exc
         return tools
 
-    async def _watched(self, ctx: StepContext, tools, role: str, variables: dict, work: Path, log_name: str, phase, tag: str, kill: str, tail_name: str | None = None):
+    async def _watched(self, ctx: StepContext, tools, role: str, variables: dict, work: Path, log_name: str, phase, tag: str, kill: str, tail_name: str | None = None,
+                       guard=None):
         """Run a tool role in a thread (it runs for minutes and the TUI shares this event loop), showing the phases of its log as progress
-        and a heartbeat when it is quiet; stopped (x) or failed, the tool is not left running."""
+        and a heartbeat when it is quiet; stopped (x) or failed, the tool is not left running. `guard(line)`: a reason to stop the tool now
+        (the caller reads it afterwards: memories.RegisterGuard)."""
         t0 = time.monotonic()
         done = anyio.Event()
         tail = vivado.LogTail(work / (tail_name or log_name))  # (the tool's own log, when it writes one: it grows while the tool runs)
 
         async def watch() -> None:
-            quiet, last = 0.0, ""
+            quiet, last, stopped = 0.0, "", False
             while not done.is_set():
                 with anyio.move_on_after(2):
                     await done.wait()
-                shown = [p for p in map(phase, tail.new()) if p]
+                new = tail.new()
+                if guard is not None and not stopped:
+                    reason = next((r for r in map(guard, new) if r), None)
+                    if reason:
+                        stopped = True
+                        ctx.emit("warning", message=f"{tag}: stopped — {reason[:300]}")
+                        await anyio.to_thread.run_sync(lambda: subprocess.run(["pkill", "-TERM", "-f", kill], capture_output=True))
+                shown = [p for p in map(phase, new) if p]
                 for p in dict.fromkeys(shown[-3:]):
                     if p != last:  # (a pass that repeats is shown once)
                         ctx.emit("log", message=f"{tag}: {p}")
@@ -149,19 +191,30 @@ class Step(FpgaStep):
         self.artifact(engine, SYNTH_JSON).unlink(missing_ok=True)
         tpl = self.template()
         try:
+            plan, facts = await anyio.to_thread.run_sync(lambda: self.memory_plan(engine, tpl.backend))
+        except memmod.PlanError as exc:
+            raise StepFailed(f"FPGA synthesis not run: {exc}") from exc
+        for note in plan.notes:
+            ctx.emit("warning", message=note)
+        if plan.timing:  # (accepted for one place to write it; asic_synth applies it)
+            ctx.emit("warning", message="options.blackbox_timing is not applied by the FPGA flow: Vivado times no pin of a black box (Constraints 18-472)")
+        if plan.active:
+            ctx.emit("log", message="memories: " + "; ".join([*(f"{m} from {project.rel(p)}" for m, p in plan.bodies.items()),
+                                                            *(f"{m} as a black box" for m in plan.blackbox)]))
+        try:
             ported = self.read(engine, portmod.PORT_JSON, {}) or {}
             if "fpga_port" in engine.by_name and ported and ported.get("family") != tpl.id:
                 raise SynthFailed(f"the part is now {self.part()[0]} ({tpl.label}); fpga_port ported for {ported.get('family')}", f"{portmod.PART_CHANGED} {tpl.label}")
-            missing = portmod.stage_inits(project, self.rtl_files(engine), tpl, self.workdir(engine))
+            missing = portmod.stage_inits(project, plan.files, tpl, self.workdir(engine))
             if missing:  # (said before the tool runs: Quartus Pro stops on it, the others synthesize an empty memory away)
                 raise SynthFailed(f"the memory initialization file(s) {', '.join(missing)} the RTL names are not there (beside the RTL or in "
                                   f"{project.rel(project.fpga_src_dir)}/)", f"{tpl.tool} reads {', '.join(missing)} and they are not there")
             if tpl.backend == "yosys":
-                await self._run_oss(ctx, tpl)
+                await self._run_oss(ctx, tpl, plan)
             elif tpl.backend == "quartus":
-                await self._run_quartus(ctx, tpl)
+                await self._run_quartus(ctx, tpl, plan)
             else:
-                await self._run_vivado(ctx, tpl)
+                await self._run_vivado(ctx, tpl, plan, facts)
         except SynthFailed as exc:
             await self._hand_back(ctx, tpl, exc, meta)
 
@@ -194,7 +247,7 @@ class Step(FpgaStep):
         errs = "; ".join(d.message for d in res.errors[:3]) or (lines[0] if lines else "no error line")
         return SynthFailed(f"{what}: {errs} (log: {engine.project.rel(rep / 'synth.log')})", "\n".join(lines))
 
-    async def _run_vivado(self, ctx: StepContext, tpl) -> None:
+    async def _run_vivado(self, ctx: StepContext, tpl, plan: memmod.Plan, facts=None) -> None:
         engine, project = ctx.engine, ctx.project
         top = self.top(engine)
         tools = await self._need(engine, "fpga_synth", "module xilinx/vivado")
@@ -207,11 +260,15 @@ class Step(FpgaStep):
         script = project.fpga_dir / "synth.tcl"
         script.parent.mkdir(parents=True, exist_ok=True)
         project.backup([script])
-        script.write_text(vivado.script_text(self.rtl_files(engine), top, project.sdc_dir, work, {**self.options, "fpga": {**self._fpga_cfg(), "part": part}}))
+        script.write_text(vivado.script_text(plan.files, top, project.sdc_dir, work, {**self.options, "fpga": {**self._fpga_cfg(), "part": part}}))
         ctx.emit("log", message=f"synthesizing {top} for {part} (out of context)…")
         t0 = time.monotonic()
-        res = await self._watched(ctx, tools, "fpga_synth", {"script": script, "top": top, "filelist": self.filelist(engine), "files": self.rtl_files(engine),
-                                                           "workdir": work, "part": part}, work, "vivado.log", vivado.phase_line, "vivado", str(script))
+        guard = memmod.RegisterGuard(facts, set(plan.blackbox), memmod.max_register_bits(self.options), plan) if facts is not None else None
+        res = await self._watched(ctx, tools, "fpga_synth", {"script": script, "top": top, "filelist": self.filelist(engine), "files": plan.files,
+                                                           "workdir": work, "part": part}, work, "vivado.log", vivado.phase_line, "vivado", str(script),
+                                  guard=guard.line if guard is not None else None)
+        if guard is not None and guard.reason:  # (stopped before it filled the machine's memory: a setting of yours, not a fix for fpga_port)
+            raise StepFailed(f"FPGA synthesis stopped: {guard.reason}")
         toolmod.check_broken(res, "fpga_synth")
         if not res.ok:
             raise self._failed(engine, res, "synthesis failed")
@@ -234,10 +291,11 @@ class Step(FpgaStep):
                                         "implemented": bool(self._fpga_cfg().get("implement")), "status": "pass",
                                         "runtime_s": round(time.monotonic() - t0, 1), "log": project.rel(Path(res.log_path)),
                                         "warnings": sum(d.severity == "warning" for d in res.diagnostics) - crit,
-                                        "critical_warnings": crit, "critical_warning_messages": list(dict.fromkeys(critical))[:10], "reports": got})
+                                        "critical_warnings": crit, "critical_warning_messages": list(dict.fromkeys(critical))[:10], "reports": got,
+                                        **self._memories(engine, plan)})
         ctx.emit("log", message=f"synthesis done in {time.monotonic() - t0:.0f} s ({crit} critical warning(s)); reports in build/syn/fpga/reports/")
 
-    async def _run_quartus(self, ctx: StepContext, tpl) -> None:
+    async def _run_quartus(self, ctx: StepContext, tpl, plan: memmod.Plan) -> None:
         """Quartus Prime (the Intel families): the project, synthesis (and the fit with `implement`), the Timing Analyzer on the result; the same
         report names as Vivado's (utilization = the summary, utilization_hier = the per-entity table, timing / paths / clocks = Fmax)."""
         engine, project = ctx.engine, ctx.project
@@ -254,7 +312,7 @@ class Step(FpgaStep):
         device, note = self.part()
         if note:
             ctx.emit("warning", message=note)
-        rtl = self.rtl_files(engine)
+        rtl = plan.files
         portmod.stage_inits(project, rtl, tpl, work)  # (again: the clean-up above; Quartus Pro reads them in its project folder, not on the search path)
         sdc = self.sdc_inputs(engine)
         cfg = {**self._fpga_cfg(), **{k: self.options[k] for k in ("defines",) if self.options.get(k)}}
@@ -291,10 +349,11 @@ class Step(FpgaStep):
                                         "top": top, "mode": "in_context", "implemented": bool(cfg.get("implement")), "status": "pass",
                                         "runtime_s": round(time.monotonic() - t0, 1), "log": project.rel(Path(res.log_path)),
                                         "warnings": sum(1 for ln in log.splitlines() if ln.startswith("Warning")), "critical_warnings": len(critical),
-                                        "critical_warning_messages": list(dict.fromkeys(critical))[:10], "reports": [n for n in files if n != "synth.log"]})
+                                        "critical_warning_messages": list(dict.fromkeys(critical))[:10], "reports": [n for n in files if n != "synth.log"],
+                                        **self._memories(engine, plan)})
         ctx.emit("log", message=f"synthesis done in {time.monotonic() - t0:.0f} s ({len(critical)} critical warning(s)); reports in build/syn/fpga/reports/")
 
-    async def _run_oss(self, ctx: StepContext, tpl) -> None:
+    async def _run_oss(self, ctx: StepContext, tpl, plan: memmod.Plan) -> None:
         """Yosys (synthesis to the family's cells) then nextpnr (place and route, out of context): the same reports as Vivado's."""
         engine, project = ctx.engine, ctx.project
         top = self.top(engine)
@@ -316,11 +375,11 @@ class Step(FpgaStep):
         script.parent.mkdir(parents=True, exist_ok=True)
         project.backup([script])
         js, stat = work / "out.json", work / "stat.rpt"
-        script.write_text(oss.yosys_script(self.rtl_files(engine), top, tpl, js, stat, self.options))
+        script.write_text(oss.yosys_script(plan.files, top, tpl, js, stat, self.options))
         label = f"{tpl.family} {device}" + (f" {package}" if package else "") + (f" -{speed}" if speed else "")
         ctx.emit("log", message=f"synthesizing {top} for {label} with Yosys, then place and route with nextpnr (out of context)…")
         t0 = time.monotonic()
-        res = await self._watched(ctx, tools, "fpga_yosys", {"script": script, "top": top, "files": self.rtl_files(engine), "workdir": work}, work, "yosys.out",
+        res = await self._watched(ctx, tools, "fpga_yosys", {"script": script, "top": top, "files": plan.files, "workdir": work}, work, "yosys.out",
                                   oss.phase_line, "yosys", str(script), tail_name="yosys.log")
         toolmod.check_broken(res, "fpga_yosys")
         if not res.ok or not js.is_file():
@@ -348,5 +407,6 @@ class Step(FpgaStep):
         self.write(engine, SYNTH_JSON, {"tool": oss.tool_version(Path(res.log_path).read_text(errors="replace") if Path(res.log_path).is_file() else ""),
                                         "template": tpl.id, "backend": "yosys", "family": tpl.family, "part": label, "device": device, "package": package, "speed": speed,
                                         "top": top, "mode": "out_of_context", "implemented": True, "status": "pass", "runtime_s": round(time.monotonic() - t0, 1),
-                                        "log": project.rel(work / "pnr.log"), "warnings": warnings, "critical_warnings": 0, "critical_warning_messages": [], "reports": list(files)})
+                                        "log": project.rel(work / "pnr.log"), "warnings": warnings, "critical_warnings": 0, "critical_warning_messages": [], "reports": list(files),
+                                        **self._memories(engine, plan)})
         ctx.emit("log", message=f"synthesis, place and route done in {time.monotonic() - t0:.0f} s; reports in build/syn/fpga/reports/")

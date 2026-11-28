@@ -99,6 +99,10 @@ class Step(StepQuestions, FpgaStep):
                 "critical_path": quartus.critical_path(text("timing.rpt")) if backend == "quartus" else (oss if backend == "yosys" else vivado).critical_path(text("paths.rpt")),
                 "unconstrained": vivado.unconstrained(text("check_timing.rpt")) if backend == "vivado" else {},
                 "targets": targets, "verdict": verdict}
+        if synth.get("memories"):  # (the logic and the memories apart: the memory modules' instances of the per-instance utilization)
+            from q3tui.flows.fpga.lib import memories as memmod
+
+            data.update(memmod.fpga_split(synth["memories"], memmod.vivado_rows(text("utilization_hier.rpt")) if backend == "vivado" else [], util))
         self.write(engine, PPA_JSON, data)
         lut, ff = util.get("lut", {}), util.get("ff", {})
         ctx.emit("log", message=f"PPA ({data['stage']}): {lut.get('used')} {lut.get('label') or 'LUT'}, {ff.get('used')} {ff.get('label') or 'FF'}, WNS {timing['wns_ns']} ns"
@@ -113,7 +117,8 @@ class Step(StepQuestions, FpgaStep):
         engine, project = ctx.engine, ctx.project
         mode = str(self.options.get("judge") or "auto")
         log = project.root / synth["log"] if synth.get("log") else None
-        ev = judge.gather(log.read_text(errors="replace") if log and log.is_file() else "", self.rtl_files(engine))
+        read = [project.root / f for f in (synth.get("memories") or {}).get("files") or []]  # (target bodies and black-box stubs: what the tool read)
+        ev = judge.gather(log.read_text(errors="replace") if log and log.is_file() else "", read or self.rtl_files(engine))
         why = judge.suspicious(ev, util)
         if mode == "off":
             verdict["plausibility"] = "n/a"

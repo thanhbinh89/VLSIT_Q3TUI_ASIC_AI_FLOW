@@ -16,6 +16,48 @@ PPA_JSON = "ppa_report.json"  # schemas/: utilization + timing + verdict against
 class FpgaStep(StepDef):
     """Base of the FPGA flow's steps. The RTL is the VLSIT flow's result (`src/rtl/`, read only); the constraints are `constraints/sdc/`."""
 
+    uses_memory_modules = False  # (the step reads `project.memory_modules`: it is part of its staleness when set)
+
+    def memory_modules(self, engine) -> list[str]:
+        """`project.memory_modules` as written (names or patterns)."""
+        return [str(x) for x in getattr(engine.project.cfg.project, "memory_modules", None) or [] if str(x).strip()]
+
+    uses_min_mem_words = False  # (the step proposes memory modules: asic_port's `min_mem_words` is part of its staleness when set)
+
+    def min_mem_words(self, engine) -> int:
+        """asic_port's `min_mem_words` (16 unless set), in every flow: an unpacked array this deep makes its module a memory module (the
+        `memory_array` rule)."""
+        from q3tui.flows.fpga.lib import memories as memmod
+
+        port = next((s for s in engine.steps if s.kind == "asic.asic_port"), None)
+        raw = (port.options if port is not None else (engine.project.cfg.pipeline.step_options or {}).get("asic_port") or {}).get("min_mem_words")
+        try:
+            return max(1, int(raw or memmod.MIN_WORDS))
+        except (TypeError, ValueError):
+            return memmod.MIN_WORDS
+
+    def extra_hash(self, engine) -> dict | None:
+        from q3tui.flows.fpga.lib import memories as memmod
+
+        out: dict = {}
+        mm = self.memory_modules(engine) if self.uses_memory_modules else []
+        if mm:
+            out["memory_modules"] = mm
+        words = self.min_mem_words(engine) if self.uses_min_mem_words else memmod.MIN_WORDS
+        if words != memmod.MIN_WORDS:
+            out["min_mem_words"] = words
+        return out or None
+
+    def body_files(self, engine, options: dict | None = None) -> list[Path]:
+        """The target bodies of `options.bodies` (this step's, or the `options` given): inputs of the step (lib/memories.py)."""
+        from q3tui.flows.fpga.lib import memories as memmod
+
+        try:
+            raw = memmod.option_bodies((self.options if options is None else options).get("bodies"))
+        except memmod.PlanError:
+            return []
+        return [memmod._path(engine.project, v) for v in raw.values()]
+
     def rtl_dir(self, engine) -> Path:
         return engine.project.rtl_dir
 
