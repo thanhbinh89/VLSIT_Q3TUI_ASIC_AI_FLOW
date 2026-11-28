@@ -360,6 +360,9 @@ class Engine:
             data["options"] = opts
         if step.checks_version:  # Q3TUI's checks on this step's result changed: re-check it (no LLM when it passes)
             data["checks"] = step.checks_version
+        extra = step.extra_hash(self)  # (settings outside its options that change its result: project.memory_modules)
+        if extra:
+            data["extra"] = extra
         spec = self.flow.spec(step.name)
         if spec is not None and (spec.options or spec.deps is not None or spec.passes or spec.notes):  # the flow file's settings for it are inputs too
             data["flow"] = spec.fingerprint()

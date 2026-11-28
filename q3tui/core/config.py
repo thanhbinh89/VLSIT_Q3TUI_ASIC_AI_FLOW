@@ -163,6 +163,9 @@ class ProjectConfig(_Strict):
     req_dir: str = "req"
     arch_dir: str = "arch"
     model_dir: str = "model"
+    # the memory-wrapper modules (names or shell patterns: m_*_sram_*): black boxes of the sanity analysis, given apart from the logic by
+    # the fpga and asic flows, which can give them a target body or make them black boxes (docs/spec/fpga-flow.md "Memories")
+    memory_modules: list[str] = Field(default_factory=list)
 
 
 class PipelineConfig(_Strict):

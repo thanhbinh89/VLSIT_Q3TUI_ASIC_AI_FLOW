@@ -168,6 +168,10 @@ class StepDef:
     # bumped when Q3TUI's checks on this step's result change: done results go stale and are re-checked (a
     # result that passes is kept without the LLM; one that fails is repaired, not regenerated)
     checks_version: int = 0
+
+    def extra_hash(self, engine: "Engine") -> dict | None:
+        """Settings outside the step's options that change its result (part of its staleness): None (the default) adds nothing."""
+        return None
     # the options that change this step's result (a template, a library, a target): their values are part of the step's staleness, wherever
     # they come from (the flow file, `pipeline.step_options` of q3tui.yaml, Settings). Others (a round limit, a goal) do not rerun it.
     hashed_options: tuple[str, ...] = ()
